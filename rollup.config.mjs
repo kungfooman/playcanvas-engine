@@ -1,3 +1,6 @@
+
+// # npm run build:debug && cp build/playcanvas.dbg.js ../playcanvas-engine/examples/dist/iframe/ENGINE_PATH/playcanvas.dbg.js
+
 import { execSync } from 'node:child_process';
 import * as fs from 'node:fs';
 
@@ -86,7 +89,8 @@ const es5Options = buildType => ({
                 }
             }
         ]
-    ]
+    ],
+    skipPreflightCheck: true
 });
 
 /**
@@ -112,7 +116,8 @@ const moduleOptions = buildType => ({
                 }
             }
         ]
-    ]
+    ],
+    skipPreflightCheck: true
 });
 
 const stripFunctions = [
@@ -214,11 +219,13 @@ function buildTarget(buildType, moduleFormat) {
         plugins: outputPlugins[buildType || outputPlugins.release],
         format: outputFormat[moduleFormat],
         indent: '\t',
-        sourcemap: sourceMap[buildType] || sourceMap.release,
+        //sourcemap: sourceMap[buildType] || sourceMap.release,
         name: 'pc',
-        preserveModules: moduleFormat === 'es6'
+        //preserveModules: moduleFormat === 'es6'
     };
 
+    // todo: build playcanvas.rti.mjs and rti.js
+    //outputOptions[moduleFormat === 'es6' ? 'dir' : 'file'] = `${outputFile[buildType]}${outputExtension[moduleFormat]}`;
     outputOptions[moduleFormat === 'es6' ? 'dir' : 'file'] = `${outputFile[buildType]}${outputExtension[moduleFormat]}`;
 
     const sdkVersion = {
@@ -263,10 +270,18 @@ function buildTarget(buildType, moduleFormat) {
         input: rootFile,
         output: outputOptions,
         plugins: [
+            runtimeTypeInspector({
+                enable: buildType === 'debug',
+                selfTest: true,
+                ignoredFiles: [
+                    'framework/parsers/draco-worker.js' // runs in Worker context without RTI
+                ],
+            }),
+            resolve(),
             jscc(jsccOptions[buildType] || jsccOptions.release),
             shaderChunks({ enabled: buildType !== 'debug' }),
             engineLayerImportValidation(rootFile, buildType === 'debug'),
-            buildType !== 'debug' ? strip(stripOptions) : undefined,
+            //buildType !== 'debug' ? strip(stripOptions) : undefined,
             babel(babelOptions[moduleFormat]),
             spacesToTabs(buildType !== 'debug')
         ]

@@ -5,8 +5,22 @@ import { Vec4 } from './core/math/vec4.js';
 import { Quat } from './core/math/quat.js';
 import { Mat3 } from './core/math/mat3.js';
 import { Mat4 } from './core/math/mat4.js';
-import { customTypes, customValidations, validateNumber, TypePanel } from '@runtime-type-inspector/runtime';
+import { customTypes, customValidations, validateNumber, TypePanel, typedefs } from '@runtime-type-inspector/runtime';
 import 'display-anything/src/style.js';
+
+// Ignore unhandled atm
+typedefs['reference'] = 'any';
+
+function ArrayLikeNumber(value) {
+    if (!value) {
+        return false;
+    }
+    if (typeof value.length !== 'number') {
+        return false;
+    }
+    // Check every single item (todo)
+    return true;
+}
 Object.assign(customTypes, {
     AnimSetter(value) {
         // Fix for type in ./framework/anim/evaluator/anim-target.js
@@ -31,16 +45,6 @@ Object.assign(customTypes, {
     Renderer(value) {
         // E.g. instance of `ForwardRenderer`
         return value?.constructor?.name?.endsWith('Renderer');
-    },
-    ArrayLike(value) {
-        if (!value) {
-            return false;
-        }
-        if (typeof value.length !== 'number') {
-            return false;
-        }
-        // Check every single item (todo)
-        return true;
     }
 });
 // For quickly checking props of Vec2/Vec3/Vec4/Quat/Mat3/Mat4 without GC
@@ -103,6 +107,36 @@ function validate(value, expect, loc, name, critical, warn, depth) {
     return true;
 }
 customValidations.push(validate);
+/**
+* `@ignoreRTI`
+* @param {any} value - The value.
+* @param {*} expect - Expected type structure.
+* @todo Split array/class.
+* @param {string} loc - String like `BoundingBox#compute`
+* @param {string} name - Name of the argument.
+* @param {boolean} critical - Only false for unions.
+* @param {console["warn"]} warn - Function to warn with.
+* @param {number} depth - The depth to detect recursion.
+* @returns {boolean} Only false if we can find some NaN issues or denormalisation issues.
+*/
+function validateReference(value, expect, loc, name, critical, warn, depth) {
+    if (!expect) {
+        return true;
+    }
+    // `expect` should be:
+    //   args: ['number']
+    //   name: "ArrayLike"
+    //   optional: false
+    //   type: "reference"
+    if (expect.type !== 'reference') {
+        return true;
+    }
+    if (expect.args[0] === "number") {
+        return ArrayLikeNumber(value);
+    }
+    return true;
+}
+customValidations.push(validateReference);
 export const typePanel = new TypePanel();
 globalThis.parent.addEventListener('message', (e) => {
     if (e.data.type !== 'rti') {

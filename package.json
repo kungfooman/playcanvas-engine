@@ -128,6 +128,7 @@
     "build:treenet": "node build.mjs --treenet",
     "build:treesun": "node build.mjs --treesun",
     "build:sourcemaps": "node build.mjs --type=rel --format=esm --sourcemaps",
+    "build:rti": "npm run build --prefix rti",
     "watch": "turbo run watch:all",
     "watch:rel:umd": "node build.mjs --type=rel --format=umd --watch",
     "watch:rel:esm": "node build.mjs --type=rel --format=esm --watch",

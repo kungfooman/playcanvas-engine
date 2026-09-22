@@ -14,6 +14,8 @@
     "dev:https": "npm run -s build:metadata && cross-env NODE_ENV=development EXAMPLES_HTTPS=1 vite",
     "develop": "npm run -s build:metadata && cross-env NODE_ENV=development EXAMPLES_AUTO_RELOAD=false vite",
     "develop:https": "npm run -s build:metadata && cross-env NODE_ENV=development EXAMPLES_AUTO_RELOAD=false EXAMPLES_HTTPS=1 vite",
+    "develop:rti": "npm --prefix ../rti run stage && cross-env ENGINE_PATH=../build/ENGINE_PATH/index.js NODE_ENV=development EXAMPLES_AUTO_RELOAD=false vite",
+    "build:rti": "npm --prefix ../rti run stage && cross-env ENGINE_PATH=../build/ENGINE_PATH/index.js NODE_ENV=production node build.mjs",
     "fmt": "prettier --check \"src/examples/**/*.{mjs,jsx}\"",
     "fmt:fix": "prettier --write \"src/examples/**/*.{mjs,jsx}\"",
     "lint": "eslint .",

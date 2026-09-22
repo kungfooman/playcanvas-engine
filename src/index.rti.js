@@ -31,6 +31,16 @@ Object.assign(customTypes, {
     Renderer(value) {
         // E.g. instance of `ForwardRenderer`
         return value?.constructor?.name?.endsWith('Renderer');
+    },
+    ArrayLike(value) {
+        if (!value) {
+            return false;
+        }
+        if (typeof value.length !== 'number') {
+            return false;
+        }
+        // Check every single item (todo)
+        return true;
     }
 });
 // For quickly checking props of Vec2/Vec3/Vec4/Quat/Mat3/Mat4 without GC

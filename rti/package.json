@@ -1,0 +1,22 @@
+{
+  "name": "playcanvas-rti-sandbox",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Isolated RTI build sandbox: builds build/playcanvas.rti.js|mjs from src/index.rti.js with the original Rollup setup from PR #5817, without touching root package.json",
+  "type": "module",
+  "scripts": {
+    "build": "cd .. && ./rti/node_modules/.bin/rollup -c rti/rollup.config.mjs",
+    "build:es": "cd .. && ./rti/node_modules/.bin/rollup -c rti/rollup.config.mjs --environment RTI_FORMAT:es",
+    "stage": "npm run build:es && node stage.mjs"
+  },
+  "dependencies": {
+    "@rollup/plugin-node-resolve": "16.0.0",
+    "@runtime-type-inspector/plugin-rollup": "4.0.6",
+    "@runtime-type-inspector/runtime": "4.0.6",
+    "fflate": "0.8.3",
+    "rollup": "4.35.0"
+  },
+  "engines": {
+    "node": ">=18.3.0"
+  }
+}

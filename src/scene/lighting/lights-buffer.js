@@ -1,11 +1,10 @@
 import { Vec3 } from '../../core/math/vec3.js';
-import { PIXELFORMAT_RGBA32F, ADDRESS_CLAMP_TO_EDGE, TEXTURETYPE_DEFAULT, FILTER_NEAREST } from '../../platform/graphics/constants.js';
+import { PIXELFORMAT_RGBA32F, ADDRESS_CLAMP_TO_EDGE, TEXTURETYPE_DEFAULT, FILTER_NEAREST, SHADERLANGUAGE_GLSL, SHADERLANGUAGE_WGSL } from '../../platform/graphics/constants.js';
 import { FloatPacking } from '../../core/math/float-packing.js';
 import { LIGHTSHAPE_PUNCTUAL, LIGHTTYPE_SPOT, LIGHTSHAPE_RECT, LIGHTSHAPE_DISK, LIGHTSHAPE_SPHERE, LIGHT_COLOR_DIVIDER } from '../constants.js';
 import { Texture } from '../../platform/graphics/texture.js';
 import { LightCamera } from '../renderer/light-camera.js';
-import { shaderChunks } from '../shader-lib/chunks/chunks.js';
-import { shaderChunksWGSL } from '../shader-lib/chunks-wgsl/chunks-wgsl.js';
+import { ShaderChunks } from '../shader-lib/shader-chunks.js';
 
 const tempVec3 = new Vec3();
 const tempAreaLightSizes = new Float32Array(6);
@@ -16,7 +15,7 @@ const areaHalfAxisHeight = new Vec3(0, 0, 0.5);
 const TextureIndexFloat = {
     POSITION_RANGE: 0,              // positions.xyz, range
     DIRECTION_FLAGS: 1,             // spot direction.xyz, 32bit flags
-    COLOR_ANGLES_BIAS: 2,           // color.rgb, spot inner and outer, bias and normal bias (half floats format), 16bits unused
+    COLOR_ANGLES_BIAS: 2,           // x: color.rg, y: color.b & angle flags, z: cone angles, w: biases (all packed as 16-bit values)
 
     PROJ_MAT_0: 3,                  // projection matrix row 0 (spot light)
     ATLAS_VIEWPORT: 3,              // atlas viewport data (omni light)
@@ -49,7 +48,7 @@ const buildShaderDefines = (object, prefix) => {
 };
 
 // create a shader chunk with defines for the light buffer textures
-shaderChunks.lightBufferDefinesPS = shaderChunksWGSL.lightBufferDefinesPS = `\n
+const lightBufferDefines = `\n
     ${buildShaderDefines(TextureIndexFloat, 'CLUSTER_TEXTURE_')}
     ${buildShaderDefines(enums, '')}
 `;
@@ -58,30 +57,69 @@ shaderChunks.lightBufferDefinesPS = shaderChunksWGSL.lightBufferDefinesPS = `\n
 class LightsBuffer {
     areaLightsEnabled = false;
 
+    /**
+     * Texture storing properties of all lights, one row of pixels per light.
+     *
+     * @type {Texture|null}
+     */
+    lightsTexture = null;
+
+    /** @type {number} */
+    _maxLights = 0;
+
     constructor(device) {
 
         this.device = device;
+
+        // shader chunk with defines
+        ShaderChunks.get(device, SHADERLANGUAGE_GLSL).set('lightBufferDefinesPS', lightBufferDefines);
+        ShaderChunks.get(device, SHADERLANGUAGE_WGSL).set('lightBufferDefinesPS', lightBufferDefines);
 
         // features
         this.cookiesEnabled = false;
         this.shadowsEnabled = false;
         this.areaLightsEnabled = false;
 
-        // using 8 bit index so this is maximum supported number of lights
-        this.maxLights = 255;
-
-        // float texture
-        const pixelsPerLightFloat = TextureIndexFloat.COUNT;
-        this.lightsFloat = new Float32Array(4 * pixelsPerLightFloat * this.maxLights);
-        this.lightsUint = new Uint32Array(this.lightsFloat.buffer);
-        this.lightsTexture = this.createTexture(this.device, pixelsPerLightFloat, this.maxLights, PIXELFORMAT_RGBA32F, 'LightsTexture');
         this._lightsTextureId = this.device.scope.resolve('lightsTexture');
+
+        // allocates the storage for the lights - 255 lights and the reserved 'no light' slot
+        this.maxLights = 256;
 
         // compression ranges
         this.invMaxColorValue = 0;
         this.invMaxAttenuation = 0;
         this.boundsMin = new Vec3();
         this.boundsDelta = new Vec3();
+    }
+
+    /**
+     * Sets the number of light slots the buffer can store, and allocates the storage for them. This
+     * includes slot 0, which is reserved for the 'no light' index, and so the number of usable
+     * lights is one less than this.
+     *
+     * @type {number}
+     */
+    set maxLights(value) {
+        if (this._maxLights !== value) {
+            this._maxLights = value;
+
+            // float texture, one row of pixels per light
+            const pixelsPerLightFloat = TextureIndexFloat.COUNT;
+            this.lightsFloat = new Float32Array(4 * pixelsPerLightFloat * value);
+            this.lightsUint = new Uint32Array(this.lightsFloat.buffer);
+
+            this.lightsTexture?.destroy();
+            this.lightsTexture = this.createTexture(this.device, pixelsPerLightFloat, value, PIXELFORMAT_RGBA32F, 'LightsTexture');
+        }
+    }
+
+    /**
+     * Gets the number of light slots the buffer can store.
+     *
+     * @type {number}
+     */
+    get maxLights() {
+        return this._maxLights;
     }
 
     destroy() {
@@ -152,7 +190,7 @@ class LightsBuffer {
         return tempAreaLightSizes;
     }
 
-    // fill up both float and 8bit texture data with light properties
+    // fill up the float texture data with light properties
     addLightData(light, lightIndex) {
 
         const isSpot = light._type === LIGHTTYPE_SPOT;

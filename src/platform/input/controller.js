@@ -14,7 +14,7 @@ import { Mouse } from './mouse.js';
  * A general input handler which handles both mouse and keyboard input assigned to named actions.
  * This allows you to define input handlers separately to defining keyboard/mouse configurations.
  *
- * @category Input
+ * @ignore
  */
 class Controller {
     /**
@@ -59,10 +59,10 @@ class Controller {
      * @param {Mouse} [options.mouse] - A Mouse object to use.
      * @param {GamePads} [options.gamepads] - A Gamepads object to use.
      * @example
-     * const c = new pc.Controller(document);
+     * const c = new Controller(document);
      *
      * // Register the "fire" action and assign it to both the Enter key and the space bar.
-     * c.registerKeys("fire", [pc.KEY_ENTER, pc.KEY_SPACE]);
+     * c.registerKeys("fire", [KEY_ENTER, KEY_SPACE]);
      */
     constructor(element, options = {}) {
         this._keyboard = options.keyboard || null;
@@ -158,8 +158,8 @@ class Controller {
      * @param {string} action_name - The name of the action.
      * @param {object} action - An action object to add.
      * @param {ACTION_KEYBOARD | ACTION_MOUSE | ACTION_GAMEPAD} action.type - The name of the action.
-     * @param {number[]} [action.keys] - Keyboard: A list of keycodes e.g. `[pc.KEY_A, pc.KEY_ENTER]`.
-     * @param {number} [action.button] - Mouse: e.g. `pc.MOUSEBUTTON_LEFT` - Gamepad: e.g. `pc.PAD_FACE_1`
+     * @param {number[]} [action.keys] - Keyboard: A list of keycodes e.g. `[KEY_A, KEY_ENTER]`.
+     * @param {number} [action.button] - Mouse: e.g. `MOUSEBUTTON_LEFT` - Gamepad: e.g. `PAD_FACE_1`
      * @param {number} [action.pad] - Gamepad: An index of the pad to register (use {@link PAD_1}, etc).
      */
     appendAction(action_name, action) {
@@ -168,10 +168,11 @@ class Controller {
     }
 
     /**
-     * Create or update a action which is enabled when the supplied keys are pressed.
+     * Register a new action which is enabled when the supplied keys are pressed.
      *
      * @param {string} action - The name of the action.
      * @param {number[]} keys - A list of keycodes.
+     * @throws {Error} If the action is already registered, or if `keys` is undefined.
      */
     registerKeys(action, keys) {
         if (!this._keyboard) {

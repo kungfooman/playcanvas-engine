@@ -14,14 +14,17 @@ import {
     CULLFACE_NONE,
     FILTER_LINEAR, FILTER_NEAREST,
     INDEXFORMAT_UINT32,
-    PIXELFORMAT_RGBA8, PIXELFORMAT_RGBA32F,
+    PIXELFORMAT_RGBA8, PIXELFORMAT_RGBA32F, PIXELFORMAT_RGBA32U,
     PRIMITIVE_TRIANGLES,
     SEMANTIC_ATTR0, SEMANTIC_ATTR1, SEMANTIC_ATTR2, SEMANTIC_ATTR3, SEMANTIC_ATTR4, SEMANTIC_TEXCOORD0,
     TYPE_FLOAT32,
     typedArrayIndexFormats,
     requiresManualGamma,
-    PIXELFORMAT_SRGBA8
+    PIXELFORMAT_SRGBA8,
+    SEMANTIC_POSITION,
+    isIntegerPixelFormat
 } from '../../platform/graphics/constants.js';
+import { BufferUtils } from '../../platform/graphics/buffer-utils.js';
 import { DeviceCache } from '../../platform/graphics/device-cache.js';
 import { IndexBuffer } from '../../platform/graphics/index-buffer.js';
 import { RenderTarget } from '../../platform/graphics/render-target.js';
@@ -38,12 +41,10 @@ import {
 } from '../constants.js';
 import { Mesh } from '../mesh.js';
 import { MeshInstance } from '../mesh-instance.js';
-import { createShaderFromCode } from '../shader-lib/utils.js';
-import { shaderChunks } from '../shader-lib/chunks/chunks.js';
+import { ShaderUtils } from '../shader-lib/shader-utils.js';
 import { ParticleCPUUpdater } from './cpu-updater.js';
 import { ParticleGPUUpdater } from './gpu-updater.js';
 import { ParticleMaterial } from './particle-material.js';
-
 const particleVerts = [
     [-1, -1],
     [1, -1],
@@ -79,6 +80,10 @@ function _createTexture(device, width, height, pixelData, format = PIXELFORMAT_R
             temp[i] = pixelData[i] * mult8Bit * 255;
         }
         pixelData = temp;
+    } else if (isIntegerPixelFormat(format)) {
+        // integer texture (RGBA32U) - reinterpret the float bit patterns as uint, lossless and
+        // without numeric conversion, to match the float-renderable layout exactly
+        pixelData = new Uint32Array(pixelData.buffer, pixelData.byteOffset, pixelData.length);
     }
 
     pixels.set(pixelData);
@@ -171,9 +176,10 @@ function packTexture2Floats(qA, qB) {
     return colors;
 }
 
-function calcEndTime(emitter) {
-    const interval = (Math.max(emitter.rate, emitter.rate2) * emitter.numParticles + emitter.lifetime);
-    return Date.now() + interval * 1000;
+// Estimated seconds for a non-looping emitter to spawn every particle and for the last one to
+// reach the end of its life.
+function calcSpawnDuration(emitter) {
+    return Math.max(emitter.rate, emitter.rate2) * emitter.numParticles + emitter.lifetime;
 }
 
 function subGraph(A, B) {
@@ -283,7 +289,12 @@ class ParticleEmitter {
         setProperty('orientation', PARTICLEORIENTATION_SCREEN);
 
         setProperty('depthWrite', false);
-        setProperty('noFog', false);
+        setProperty('useFog', true);
+        setProperty('useTonemap', true);
+        if (options.noFog !== undefined) {
+            Debug.deprecated('ParticleEmitter option noFog is deprecated. Use useFog instead.');
+            if (options.useFog === undefined) this.useFog = !options.noFog;
+        }
         setProperty('blendType', BLEND_NORMAL);
         setProperty('node', null);
         setProperty('startAngle', 0);
@@ -327,6 +338,8 @@ class ParticleEmitter {
 
         setProperty('radialSpeedGraph', default0Curve);
         setProperty('radialSpeedGraph2', this.radialSpeedGraph);
+        setPropertyTarget = null;
+        setPropertyOptions = null;
 
         this.animTilesParams = new Float32Array(2);
         this.animParams = new Float32Array(4);
@@ -342,23 +355,18 @@ class ParticleEmitter {
         this.useMesh = true;
         this.useCpu = !graphicsDevice.supportsGpuParticles;
 
-        this.pack8 = true;
         this.localBounds = new BoundingBox();
         this.worldBoundsNoTrail = new BoundingBox();
         this.worldBoundsTrail = [new BoundingBox(), new BoundingBox()];
         this.worldBounds = new BoundingBox();
 
-        this.worldBoundsSize = new Vec3();
-
-        this.prevWorldBoundsSize = new Vec3();
-        this.prevWorldBoundsCenter = new Vec3();
-        this.prevEmitterExtents = this.emitterExtents;
-        this.prevEmitterRadius = this.emitterRadius;
-        this.worldBoundsMul = new Vec3();
-        this.worldBoundsAdd = new Vec3();
+        // spawn volume the local bounds were last calculated for, used to detect changes to it.
+        // Note this must be a copy, as emitterExtents can be modified in place by the user.
+        this.prevEmitterExtents = new Vec3();
+        this.prevEmitterRadius = 0;
         this.timeToSwitchBounds = 0;
-        // this.prevPos = new Vec3();
 
+        // simulation shaders - do not destroy those, as they're cached and shared between emitters
         this.shaderParticleUpdateRespawn = null;
         this.shaderParticleUpdateNoRespawn = null;
         this.shaderParticleUpdateOnStop = null;
@@ -410,39 +418,16 @@ class ParticleEmitter {
         });
     }
 
-    onChangeCamera() {
-        this.resetMaterial();
-    }
-
-    calculateBoundsMad() {
-        this.worldBoundsMul.x = 1.0 / this.worldBoundsSize.x;
-        this.worldBoundsMul.y = 1.0 / this.worldBoundsSize.y;
-        this.worldBoundsMul.z = 1.0 / this.worldBoundsSize.z;
-
-        this.worldBoundsAdd.copy(this.worldBounds.center).mul(this.worldBoundsMul).mulScalar(-1);
-        this.worldBoundsAdd.x += 0.5;
-        this.worldBoundsAdd.y += 0.5;
-        this.worldBoundsAdd.z += 0.5;
-    }
-
     calculateWorldBounds() {
         if (!this.node) return;
 
-        this.prevWorldBoundsSize.copy(this.worldBoundsSize);
-        this.prevWorldBoundsCenter.copy(this.worldBounds.center);
-
-        if (!this.useCpu) {
-            let recalculateLocalBounds = false;
-            if (this.emitterShape === EMITTERSHAPE_BOX) {
-                recalculateLocalBounds = !this.emitterExtents.equals(this.prevEmitterExtents);
-            } else {
-                recalculateLocalBounds = !(this.emitterRadius === this.prevEmitterRadius);
-            }
-            if (recalculateLocalBounds) {
-                this.calculateLocalBounds();
-            }
+        // the spawn volume can be changed at any time, and the local bounds are derived from it
+        const recalculateLocalBounds = this.emitterShape === EMITTERSHAPE_BOX ?
+            !this.emitterExtents.equals(this.prevEmitterExtents) :
+            this.emitterRadius !== this.prevEmitterRadius;
+        if (recalculateLocalBounds) {
+            this.calculateLocalBounds();
         }
-
 
         const nodeWT = this.node.getWorldTransform();
         if (this.localSpace) {
@@ -463,8 +448,6 @@ class ParticleEmitter {
 
         this.worldBounds.copy(this.worldBoundsTrail[0]);
 
-        this.worldBoundsSize.copy(this.worldBounds.halfExtents).mulScalar(2);
-
         if (this.localSpace) {
             this.meshInstance.aabb.setFromTransformedAabb(this.worldBounds, nodeWT);
             this.meshInstance.mesh.aabb.setFromTransformedAabb(this.worldBounds, nodeWT);
@@ -473,8 +456,6 @@ class ParticleEmitter {
             this.meshInstance.mesh.aabb.copy(this.worldBounds);
         }
         this.meshInstance._aabbVer = 1 - this.meshInstance._aabbVer;
-
-        if (this.pack8) this.calculateBoundsMad();
     }
 
     resetWorldBounds() {
@@ -487,16 +468,17 @@ class ParticleEmitter {
         this.worldBoundsTrail[1].copy(this.worldBoundsNoTrail);
 
         this.worldBounds.copy(this.worldBoundsTrail[0]);
-        this.worldBoundsSize.copy(this.worldBounds.halfExtents).mulScalar(2);
-
-        this.prevWorldBoundsSize.copy(this.worldBoundsSize);
-        this.prevWorldBoundsCenter.copy(this.worldBounds.center);
 
         this.simTimeTotal = 0;
         this.timeToSwitchBounds = 0;
     }
 
     calculateLocalBounds() {
+
+        // store the spawn volume the bounds are calculated for, to detect later changes to it
+        this.prevEmitterExtents.copy(this.emitterExtents);
+        this.prevEmitterRadius = this.emitterRadius;
+
         let minx = Number.MAX_VALUE;
         let miny = Number.MAX_VALUE;
         let minz = Number.MAX_VALUE;
@@ -543,7 +525,9 @@ class ParticleEmitter {
             accumR[1] += this.qRadialSpeed2[index] * stepWeight;
             maxR = Math.max(maxR, Math.max(Math.abs(accumR[0]), Math.abs(accumR[1])));
 
-            maxScale = Math.max(maxScale, this.qScale[index]);
+            // both scale curves, as the rendered size is interpolated between them, and by
+            // magnitude, as a negative scale mirrors the particle without shrinking it
+            maxScale = Math.max(maxScale, Math.abs(this.qScale[index]), Math.abs(this.qScale2[index]));
         }
 
         if (this.emitterShape === EMITTERSHAPE_BOX) {
@@ -574,15 +558,13 @@ class ParticleEmitter {
         this.spawnBounds = this.emitterShape === EMITTERSHAPE_BOX ? this.emitterExtents : this.emitterRadius;
 
         this.useCpu = this.useCpu || this.sort > PARTICLESORT_NONE ||  // force CPU if desirable by user or sorting is enabled
-        gd.maxVertexTextures <= 1 || // force CPU if can't use enough vertex textures
-        gd.fragmentUniformsCount < 64 || // force CPU if can't use many uniforms; TODO: change to more realistic value (this one is iphone's)
         gd.forceCpuParticles;
 
-        this._destroyResources();
+        const wasVisible = this._destroyResources();
 
-        this.pack8 = (this.pack8 || !gd.textureFloatRenderable) && !this.useCpu;
-
-        particleTexHeight = (this.useCpu || this.pack8) ? 4 : 2;
+        // GPU particles use 2 texture rows (RGBA32F, or RGBA32U as a lossless fallback when float
+        // textures are not renderable); CPU particles use 4 rows
+        particleTexHeight = this.useCpu ? 4 : 2;
 
         this.useMesh = !!this.mesh;
 
@@ -592,17 +574,11 @@ class ParticleEmitter {
         this.resetWorldBounds();
 
         if (this.node) {
-            // this.prevPos.copy(this.node.getPosition());
             this.worldBounds.setFromTransformedAabb(
                 this.localBounds, this.localSpace ? Mat4.IDENTITY : this.node.getWorldTransform());
 
             this.worldBoundsTrail[0].copy(this.worldBounds);
             this.worldBoundsTrail[1].copy(this.worldBounds);
-
-            this.worldBoundsSize.copy(this.worldBounds.halfExtents).mulScalar(2);
-            this.prevWorldBoundsSize.copy(this.worldBoundsSize);
-            this.prevWorldBoundsCenter.copy(this.worldBounds.center);
-            if (this.pack8) this.calculateBoundsMad();
         }
 
         // Dynamic simulation data
@@ -635,15 +611,12 @@ class ParticleEmitter {
         }
 
         if (!this.useCpu) {
-            if (this.pack8) {
-                this.particleTexIN = _createTexture(gd, this.numParticlesPot, particleTexHeight, this.particleTex, PIXELFORMAT_RGBA8, 1, false);
-                this.particleTexOUT = _createTexture(gd, this.numParticlesPot, particleTexHeight, this.particleTex, PIXELFORMAT_RGBA8, 1, false);
-                this.particleTexStart = _createTexture(gd, this.numParticlesPot, particleTexHeight, this.particleTexStart, PIXELFORMAT_RGBA8, 1, false);
-            } else {
-                this.particleTexIN = _createTexture(gd, this.numParticlesPot, particleTexHeight, this.particleTex);
-                this.particleTexOUT = _createTexture(gd, this.numParticlesPot, particleTexHeight, this.particleTex);
-                this.particleTexStart = _createTexture(gd, this.numParticlesPot, particleTexHeight, this.particleTexStart);
-            }
+            // use float textures when renderable, otherwise fall back to integer textures storing
+            // the exact float bits (RGBA32U is always renderable on WebGL2 and WebGPU)
+            const particleFormat = gd.textureFloatRenderable ? PIXELFORMAT_RGBA32F : PIXELFORMAT_RGBA32U;
+            this.particleTexIN = _createTexture(gd, this.numParticlesPot, particleTexHeight, this.particleTex, particleFormat);
+            this.particleTexOUT = _createTexture(gd, this.numParticlesPot, particleTexHeight, this.particleTex, particleFormat);
+            this.particleTexStart = _createTexture(gd, this.numParticlesPot, particleTexHeight, this.particleTexStart, particleFormat);
 
             this.rtParticleTexIN = new RenderTarget({
                 colorBuffer: this.particleTexIN,
@@ -659,31 +632,37 @@ class ParticleEmitter {
         // create 3 simulation shaders
         const defines = new Map();
         if (this.localSpace) defines.set('LOCAL_SPACE', '');
-        if (this.pack8) defines.set('PACK8', '');
         if (this.emitterShape === EMITTERSHAPE_BOX) defines.set('EMITTERSHAPE_BOX', '');
+        const shaderUniqueId = `Shape:${this.emitterShape}-Local:${this.localSpace}`;
 
-        const includes = new Map(Object.entries(shaderChunks));
-
-        const shaderCodeRespawn = `#define RESPAWN\n ${shaderChunks.particle_simulationPS}`;
-        const shaderCodeNoRespawn = `#define NO_RESPAWN\n ${shaderChunks.particle_simulationPS}`;
-        const shaderCodeOnStop = `#define ON_STOP\n ${shaderChunks.particle_simulationPS}`;
-
-        // Note: createShaderFromCode can return a shader from the cache (not a new shader) so we *should not* delete these shaders
-        // when the particle emitter is destroyed
-        const params = `Shape:${this.emitterShape}-Pack:${this.pack8}-Local:${this.localSpace}`;
-        this.shaderParticleUpdateRespawn = createShaderFromCode(gd, shaderChunks.fullscreenQuadVS, shaderCodeRespawn, `ParticleUpdateRespawn-${params}`, undefined, false, {
+        // shader options shared by all 3 shaders. The fragment output type matches the particle
+        // state texture - uvec4 for the RGBA32U fallback used when float is not renderable.
+        const shaderOptions = {
+            attributes: { vertex_position: SEMANTIC_POSITION },
+            vertexChunk: 'fullscreenQuadVS',
+            fragmentChunk: 'particle_simulationPS',
             fragmentDefines: defines,
-            fragmentIncludes: includes
-        });
-        this.shaderParticleUpdateNoRespawn = createShaderFromCode(gd, shaderChunks.fullscreenQuadVS, shaderCodeNoRespawn, `ParticleUpdateNoRespawn-${params}`, undefined, false, {
-            fragmentDefines: defines,
-            fragmentIncludes: includes
-        });
-        this.shaderParticleUpdateOnStop = createShaderFromCode(gd, shaderChunks.fullscreenQuadVS, shaderCodeOnStop, `ParticleUpdateStop-${params}`, undefined, false, {
-            fragmentDefines: defines,
-            fragmentIncludes: includes
-        });
+            fragmentOutputTypes: gd.textureFloatRenderable ? 'vec4' : 'uvec4'
+        };
 
+        // shader 1
+        shaderOptions.uniqueName = `ParticleUpdateRespawn-${shaderUniqueId}`;
+        defines.set('RESPAWN', '');
+        this.shaderParticleUpdateRespawn = ShaderUtils.createShader(gd, shaderOptions);
+        defines.delete('RESPAWN');
+
+        // shader 2
+        shaderOptions.uniqueName = `ParticleUpdateNoRespawn-${shaderUniqueId}`;
+        defines.set('NO_RESPAWN', '');
+        this.shaderParticleUpdateNoRespawn = ShaderUtils.createShader(gd, shaderOptions);
+        defines.delete('NO_RESPAWN');
+
+        // shader 3
+        shaderOptions.uniqueName = `ParticleUpdateStop-${shaderUniqueId}`;
+        defines.set('ON_STOP', '');
+        this.shaderParticleUpdateOnStop = ShaderUtils.createShader(gd, shaderOptions);
+
+        // allocate various buffers
         this.numParticleVerts = this.useMesh ? this.mesh.vertexBuffer.numVertices : 4;
         this.numParticleIndices = this.useMesh ? this.mesh.indexBuffer[0].numIndices : 6;
         this._allocate(this.numParticles);
@@ -700,7 +679,6 @@ class ParticleEmitter {
 
         this.resetMaterial();
 
-        const wasVisible = this.meshInstance ? this.meshInstance.visible : true;
         this.meshInstance = new MeshInstance(mesh, this.material, this.node);
         this.meshInstance.pick = false;
         this.meshInstance.updateKey(); // shouldn't be here?
@@ -719,6 +697,9 @@ class ParticleEmitter {
 
         this.addTime(0, false); // fill dynamic textures and constants with initial data
         if (this.preWarm) this.prewarm(this.lifetime);
+
+        // upload the filled CPU vertex buffer now; the component system skips this while paused
+        this.finishFrame();
     }
 
     _isAnimated() {
@@ -766,39 +747,6 @@ class ParticleEmitter {
         this.qScaleDiv =         divGraphFrom2Curves(this.qScale, this.qScale2, this.scaleUMax);
         this.qAlphaDiv =         divGraphFrom2Curves(this.qAlpha, this.qAlpha2, this.alphaUMax);
         this.qRadialSpeedDiv =   divGraphFrom2Curves(this.qRadialSpeed, this.qRadialSpeed2, this.radialSpeedUMax);
-
-        if (this.pack8) {
-            const umax = [0, 0, 0];
-            maxUnsignedGraphValue(this.qVelocity, umax);
-            const umax2 = [0, 0, 0];
-            maxUnsignedGraphValue(this.qVelocity2, umax2);
-
-            const lumax = [0, 0, 0];
-            maxUnsignedGraphValue(this.qLocalVelocity, lumax);
-            const lumax2 = [0, 0, 0];
-            maxUnsignedGraphValue(this.qLocalVelocity2, lumax2);
-
-            const rumax = [0];
-            maxUnsignedGraphValue(this.qRadialSpeed, rumax);
-            const rumax2 = [0];
-            maxUnsignedGraphValue(this.qRadialSpeed2, rumax2);
-
-            let maxVel = Math.max(umax[0], umax2[0]);
-            maxVel = Math.max(maxVel, umax[1]);
-            maxVel = Math.max(maxVel, umax2[1]);
-            maxVel = Math.max(maxVel, umax[2]);
-            maxVel = Math.max(maxVel, umax2[2]);
-
-            let lmaxVel = Math.max(lumax[0], lumax2[0]);
-            lmaxVel = Math.max(lmaxVel, lumax[1]);
-            lmaxVel = Math.max(lmaxVel, lumax2[1]);
-            lmaxVel = Math.max(lmaxVel, lumax[2]);
-            lmaxVel = Math.max(lmaxVel, lumax2[2]);
-
-            const maxRad = Math.max(rumax[0], rumax2[0]);
-
-            this.maxVel = maxVel + lmaxVel + maxRad;
-        }
 
         if (!this.useCpu) {
             this.internalTex0 = _createTexture(gd, precision, 1, packTextureXYZ_NXYZ(this.qLocalVelocity, this.qLocalVelocityDiv));
@@ -868,13 +816,6 @@ class ParticleEmitter {
         material.setParameter('graphSampleSize', 1.0 / this.precision);
         material.setParameter('emitterScale', new Float32Array([1, 1, 1]));
 
-        if (this.pack8) {
-            this._gpuUpdater._setInputBounds();
-            material.setParameter('inBoundsSize', this._gpuUpdater.inBoundsSizeUniform);
-            material.setParameter('inBoundsCenter', this._gpuUpdater.inBoundsCenterUniform);
-            material.setParameter('maxVel', this.maxVel);
-        }
-
         if (this.wrap && this.wrapBounds) {
             this.wrapBoundsUniform[0] = this.wrapBounds.x;
             this.wrapBoundsUniform[1] = this.wrapBounds.y;
@@ -919,6 +860,29 @@ class ParticleEmitter {
         this.material.setParameter('faceBinorm', binormal);
     }
 
+    getVertexInfo() {
+        const elements = [];
+        if (!this.useCpu) {
+            // GPU: XYZ = quad vertex position; W = INT: particle ID, FRAC: random factor
+            elements.push({ semantic: SEMANTIC_ATTR0, components: 4, type: TYPE_FLOAT32 });
+            if (this.useMesh) {
+                // mesh UVs - use the TEXCOORD0 semantic so the mesh instance reports SHADERDEF_UV0,
+                // which enables the meshUv shader path and binds particle_uv at the matching location
+                elements.push({ semantic: SEMANTIC_TEXCOORD0, components: 2, type: TYPE_FLOAT32 });
+            }
+        } else {
+            elements.push(
+                { semantic: SEMANTIC_ATTR0, components: 4, type: TYPE_FLOAT32 },
+                { semantic: SEMANTIC_ATTR1, components: 4, type: TYPE_FLOAT32 },
+                { semantic: SEMANTIC_ATTR2, components: 4, type: TYPE_FLOAT32 },
+                { semantic: SEMANTIC_ATTR3, components: 1, type: TYPE_FLOAT32 },
+                { semantic: SEMANTIC_ATTR4, components: this.useMesh ? 4 : 2, type: TYPE_FLOAT32 }
+            );
+        }
+
+        return elements;
+    }
+
     // Declares vertex format, creates VB and IB
     _allocate(numParticles) {
         const psysVertCount = numParticles * this.numParticleVerts;
@@ -926,45 +890,7 @@ class ParticleEmitter {
 
         if ((this.vertexBuffer === undefined) || (this.vertexBuffer.getNumVertices() !== psysVertCount)) {
             // Create the particle vertex format
-            const elements = [];
-            if (!this.useCpu) {
-                // GPU: XYZ = quad vertex position; W = INT: particle ID, FRAC: random factor
-                elements.push({
-                    semantic: SEMANTIC_ATTR0,
-                    components: 4,
-                    type: TYPE_FLOAT32
-                });
-                if (this.useMesh) {
-                    elements.push({
-                        semantic: SEMANTIC_ATTR1,
-                        components: 2,
-                        type: TYPE_FLOAT32
-                    });
-                }
-            } else {
-                elements.push({
-                    semantic: SEMANTIC_ATTR0,
-                    components: 4,
-                    type: TYPE_FLOAT32
-                }, {
-                    semantic: SEMANTIC_ATTR1,
-                    components: 4,
-                    type: TYPE_FLOAT32
-                }, {
-                    semantic: SEMANTIC_ATTR2,
-                    components: 4,
-                    type: TYPE_FLOAT32
-                }, {
-                    semantic: SEMANTIC_ATTR3,
-                    components: 1,
-                    type: TYPE_FLOAT32
-                }, {
-                    semantic: SEMANTIC_ATTR4,
-                    components: this.useMesh ? 4 : 2,
-                    type: TYPE_FLOAT32
-                });
-            }
-
+            const elements = this.getVertexInfo();
             const vertexFormat = new VertexFormat(this.graphicsDevice, elements);
 
             this.vertexBuffer = new VertexBuffer(this.graphicsDevice, vertexFormat, psysVertCount, {
@@ -974,16 +900,20 @@ class ParticleEmitter {
 
             // Fill the vertex buffer
             const data = new Float32Array(this.vertexBuffer.lock());
-            let meshData, stride, texCoordOffset;
+            let meshData, posOffset, posStride, uvOffset, uvStride;
             if (this.useMesh) {
-                meshData = new Float32Array(this.mesh.vertexBuffer.lock());
-                stride = meshData.length / this.mesh.vertexBuffer.numVertices;
-                for (let elem = 0; elem < this.mesh.vertexBuffer.format.elements.length; elem++) {
-                    if (this.mesh.vertexBuffer.format.elements[elem].name === SEMANTIC_TEXCOORD0) {
-                        texCoordOffset = this.mesh.vertexBuffer.format.elements[elem].offset / 4;
-                        break;
-                    }
-                }
+                meshData = BufferUtils.createStorageView(this.mesh.vertexBuffer, Float32Array);
+
+                // Copy positions and UVs using each element's own offset and stride (in floats),
+                // which handles both interleaved and non-interleaved source meshes. Procedurally
+                // generated meshes (e.g. createSphere) are non-interleaved.
+                const elements = this.mesh.vertexBuffer.format.elements;
+                const posElement = elements.find(el => el.name === SEMANTIC_POSITION);
+                const uvElement = elements.find(el => el.name === SEMANTIC_TEXCOORD0);
+                posOffset = posElement.offset / 4;
+                posStride = posElement.stride / 4;
+                uvOffset = uvElement ? uvElement.offset / 4 : -1;
+                uvStride = uvElement ? uvElement.stride / 4 : 0;
             }
 
             for (let i = 0; i < psysVertCount; i++) {
@@ -996,12 +926,19 @@ class ParticleEmitter {
                     data[i * 4 + 3] = id;
                 } else {
                     const vert = i % this.numParticleVerts;
-                    data[i * 6] = meshData[vert * stride];
-                    data[i * 6 + 1] = meshData[vert * stride + 1];
-                    data[i * 6 + 2] = meshData[vert * stride + 2];
+                    const posIndex = vert * posStride + posOffset;
+                    data[i * 6] = meshData[posIndex];
+                    data[i * 6 + 1] = meshData[posIndex + 1];
+                    data[i * 6 + 2] = meshData[posIndex + 2];
                     data[i * 6 + 3] = id;
-                    data[i * 6 + 4] = meshData[vert * stride + texCoordOffset + 0];
-                    data[i * 6 + 5] = 1.0 - meshData[vert * stride + texCoordOffset + 1];
+                    if (uvOffset >= 0) {
+                        const uvIndex = vert * uvStride + uvOffset;
+                        data[i * 6 + 4] = meshData[uvIndex];
+                        data[i * 6 + 5] = 1.0 - meshData[uvIndex + 1];
+                    } else {
+                        data[i * 6 + 4] = 0;
+                        data[i * 6 + 5] = 0;
+                    }
                 }
             }
 
@@ -1063,6 +1000,9 @@ class ParticleEmitter {
         if (this.preWarm) {
             this.prewarm(this.lifetime);
         }
+
+        // upload the filled CPU vertex buffer now; the component system skips this while paused
+        this.finishFrame();
     }
 
     prewarm(time) {
@@ -1074,8 +1014,10 @@ class ParticleEmitter {
         }
     }
 
-    resetTime() {
-        this.endTime = calcEndTime(this);
+    resetTime(duration = calcSpawnDuration(this)) {
+        // measured against the emitter's own simulation clock (simTimeTotal) so that pausing,
+        // time scaling and frame drops keep the finished state in sync with the particles
+        this.endTime = this.simTimeTotal + duration;
     }
 
     finishFrame() {
@@ -1109,11 +1051,12 @@ class ParticleEmitter {
             animIndexParams[1] = this.randomizeAnimIndex; // animTexIndexParams.y
         }
 
+        // cache the currently active camera; only the CPU distance sorter consumes it. Nothing in
+        // the material depends on the camera, so no material/shader update is needed when it changes
+        // (the render shader's camera-dependent output gamma/tonemapping is handled at draw time in
+        // ParticleMaterial.getShaderVariant).
         if (this.scene) {
-            if (this.camera !== this.scene._activeCamera) {
-                this.camera = this.scene._activeCamera;
-                this.onChangeCamera();
-            }
+            this.camera = this.scene._activeCamera;
         }
 
         if (this.emitterShape === EMITTERSHAPE_BOX) {
@@ -1152,7 +1095,7 @@ class ParticleEmitter {
         }
 
         if (!this.loop) {
-            if (Date.now() > this.endTime) {
+            if (this.simTimeTotal > this.endTime) {
                 if (this.onFinished) this.onFinished();
                 this.meshInstance.visible = false;
             }
@@ -1200,16 +1143,19 @@ class ParticleEmitter {
         this.colorParam?.destroy();
         this.colorParam = null;
 
-        this.vertexBuffer?.destroy();
         this.vertexBuffer = undefined; // we are testing if vb is undefined in some code, no idea why
-
-        this.indexBuffer?.destroy();
         this.indexBuffer = undefined;
+
+        const wasVisible = this.meshInstance?.visible ?? true;
+        this.meshInstance?.destroy();
+        this.meshInstance = null;
 
         this.material?.destroy();
         this.material = null;
 
         // note: shaders should not be destroyed as they could be shared between emitters
+
+        return wasVisible;
     }
 
     destroy() {

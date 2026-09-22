@@ -2,6 +2,7 @@ import { Debug } from '../core/debug.js';
 import { hash32Fnv1a } from '../core/hash.js';
 import {
     LIGHTTYPE_DIRECTIONAL,
+    MASK_AFFECT_DYNAMIC, MASK_AFFECT_LIGHTMAPPED, MASK_AFFECT_RUNTIME,
     SORTMODE_BACK2FRONT, SORTMODE_CUSTOM, SORTMODE_FRONT2BACK, SORTMODE_MATERIALMESH, SORTMODE_NONE
 } from './constants.js';
 import { Material } from './materials/material.js';
@@ -13,6 +14,7 @@ import { Material } from './materials/material.js';
  * @import { LightComponent } from '../framework/components/light/component.js'
  * @import { MeshInstance } from './mesh-instance.js'
  * @import { Vec3 } from '../core/math/vec3.js'
+ * @import { GSplatPlacement } from './gsplat-unified/gsplat-placement.js'
  */
 
 // Layers
@@ -20,6 +22,21 @@ let layerCounter = 0;
 
 const lightKeys = [];
 const _tempMaterials = new Set();
+
+/**
+ * Ranks a light by how broadly it applies, ordering the lights that reach every mesh instance
+ * ahead of those restricted to one kind of geometry. See {@link Layer#splitLights}.
+ *
+ * @param {Light} light - The light.
+ * @returns {number} The rank, lowest first.
+ */
+function lightSlotRank(light) {
+    const mask = light.mask & MASK_AFFECT_RUNTIME;
+    if (mask === MASK_AFFECT_RUNTIME) return 0;     // carries both bits, so reaches every mesh instance
+    if (mask & MASK_AFFECT_DYNAMIC) return 1;       // dynamic geometry is usually most of the draws
+    if (mask & MASK_AFFECT_LIGHTMAPPED) return 2;
+    return 3;                                       // contributes only to lightmaps, takes no slot
+}
 
 function sortManual(drawCallA, drawCallB) {
     return drawCallA.drawOrder - drawCallB.drawOrder;
@@ -65,16 +82,157 @@ class CulledInstances {
  * lights and cameras, their render settings and also defines custom callbacks before, after or
  * during rendering. Layers are organized inside {@link LayerComposition} in a desired order.
  *
+ * A mesh instance is drawn through the layers it belongs to, and a camera draws only the layers
+ * listed in {@link CameraComponent#layers}. Components place their mesh instances by layer id, for
+ * example through {@link RenderComponent#layers}, and lights through {@link LightComponent#layers};
+ * mesh instances you create yourself go in with {@link addMeshInstances} and out with
+ * {@link removeMeshInstances}.
+ *
+ * The application creates five layers, reachable by id from {@link Scene#layers}:
+ * {@link LAYERID_WORLD} for the scene itself, {@link LAYERID_DEPTH}, {@link LAYERID_SKYBOX},
+ * {@link LAYERID_IMMEDIATE} for debug drawing and {@link LAYERID_UI}. Within a layer, opaque and
+ * transparent mesh instances are drawn as two separate parts, ordered by {@link opaqueSortMode}
+ * and {@link transparentSortMode}, and the composition decides where each part falls in the frame.
+ * Set {@link enabled} to false to skip a layer entirely, and use {@link onEnable} and
+ * {@link onDisable} to react to that.
+ *
+ * @example
+ * // Draw a set of mesh instances in a layer of their own, right after the world's opaque objects
+ * const layers = app.scene.layers;
+ * const layer = new Layer({ name: 'Overlay' });
+ * const world = layers.getLayerById(LAYERID_WORLD);
+ * layers.insert(layer, layers.getOpaqueIndex(world) + 1);
+ * layer.addMeshInstances(meshInstances);
  * @category Graphics
  */
 class Layer {
+    // --- Identity ---
+
     /**
-     * Mesh instances assigned to this layer.
+     * A unique ID of the layer. Layer IDs are stored inside {@link ModelComponent#layers},
+     * {@link RenderComponent#layers}, {@link CameraComponent#layers},
+     * {@link LightComponent#layers} and {@link ElementComponent#layers} instead of names.
+     * Can be used in {@link LayerComposition#getLayerById}.
      *
-     * @type {MeshInstance[]}
+     * @type {number}
+     */
+    id;
+
+    /**
+     * Name of the layer. Can be used in {@link LayerComposition#getLayerByName}.
+     *
+     * @type {string}
+     */
+    name;
+
+    // --- Enabled state & ref counting ---
+
+    /**
+     * @type {boolean}
+     * @private
+     */
+    _enabled = true;
+
+    /**
+     * @type {number}
+     * @private
+     */
+    _refCounter = 1;
+
+    // --- Sorting ---
+
+    /**
+     * Defines the method used for sorting opaque (that is, not semi-transparent) mesh
+     * instances before rendering. Can be:
+     *
+     * - {@link SORTMODE_NONE}
+     * - {@link SORTMODE_MANUAL}
+     * - {@link SORTMODE_MATERIALMESH}
+     * - {@link SORTMODE_BACK2FRONT}
+     * - {@link SORTMODE_FRONT2BACK}
+     *
+     * Defaults to {@link SORTMODE_MATERIALMESH}.
+     *
+     * @type {number}
+     */
+    opaqueSortMode = SORTMODE_MATERIALMESH;
+
+    /**
+     * Defines the method used for sorting semi-transparent mesh instances before rendering. Can be:
+     *
+     * - {@link SORTMODE_NONE}
+     * - {@link SORTMODE_MANUAL}
+     * - {@link SORTMODE_MATERIALMESH}
+     * - {@link SORTMODE_BACK2FRONT}
+     * - {@link SORTMODE_FRONT2BACK}
+     *
+     * Defaults to {@link SORTMODE_BACK2FRONT}.
+     *
+     * @type {number}
+     */
+    transparentSortMode = SORTMODE_BACK2FRONT;
+
+    /**
+     * @type {Function|null}
      * @ignore
      */
-    meshInstances = [];
+    customSortCallback = null;
+
+    /**
+     * @type {Function|null}
+     * @ignore
+     */
+    customCalculateSortValues = null;
+
+    // --- Clear flags ---
+
+    /** @private */
+    _clearColorBuffer = false;
+
+    /** @private */
+    _clearDepthBuffer = false;
+
+    /** @private */
+    _clearStencilBuffer = false;
+
+    // --- Enable / disable callbacks ---
+
+    /**
+     * Custom function that is called after the layer has been enabled. This happens when:
+     *
+     * - The layer is created with {@link enabled} set to true (which is the default value).
+     * - {@link enabled} was changed from false to true
+     *
+     * @type {Function}
+     */
+    onEnable;
+
+    /**
+     * Custom function that is called after the layer has been disabled. This happens when:
+     *
+     * - {@link enabled} was changed from true to false
+     * - `decrementCounter` was called and set the counter to zero.
+     *
+     * @type {Function}
+     */
+    onDisable;
+
+    // --- Mesh instances & shadow casters ---
+
+    /**
+     * Cached mesh instances, rebuilt from the set after removals.
+     *
+     * @type {MeshInstance[]}
+     * @private
+     */
+    _meshInstances = [];
+
+    /**
+     * Whether both membership caches need rebuilding from their sets.
+     *
+     * @private
+     */
+    _meshInstancesDirty = false;
 
     /**
      * Mesh instances assigned to this layer, stored in a set.
@@ -85,12 +243,12 @@ class Layer {
     meshInstancesSet = new Set();
 
     /**
-     * Shadow casting instances assigned to this layer.
+     * Cached shadow casters, rebuilt from the set after removals.
      *
      * @type {MeshInstance[]}
-     * @ignore
+     * @private
      */
-    shadowCasters = [];
+    _shadowCasters = [];
 
     /**
      * Shadow casting instances assigned to this layer, stored in a set.
@@ -107,6 +265,8 @@ class Layer {
      * @private
      */
     _visibleInstances = new WeakMap();
+
+    // --- Lights ---
 
     /**
      * All lights assigned to a layer.
@@ -146,18 +306,30 @@ class Layer {
      * True if _splitLights needs to be updated, which means if lights were added or removed from
      * the layer, or their key changed.
      *
-     * @type {boolean}
      * @private
      */
     _splitLightsDirty = true;
 
+    /** @private */
+    _lightHash = 0;
+
+    /** @private */
+    _lightHashDirty = false;
+
+    /** @private */
+    _lightIdHash = 0;
+
+    /** @private */
+    _lightIdHashDirty = false;
+
     /**
      * True if the objects rendered on the layer require light cube (emitters with lighting do).
      *
-     * @type {boolean}
      * @ignore
      */
     requiresLightCube = false;
+
+    // --- Cameras ---
 
     /**
      * @type {CameraComponent[]}
@@ -171,12 +343,65 @@ class Layer {
      */
     camerasSet = new Set();
 
+    // --- GSplat ---
+
+    /**
+     * @type {GSplatPlacement[]}
+     * @ignore
+     */
+    gsplatPlacements = [];
+
+    /**
+     * @type {Set<GSplatPlacement>}
+     * @ignore
+     */
+    gsplatPlacementsSet = new Set();
+
+    /**
+     * @type {GSplatPlacement[]}
+     * @ignore
+     */
+    gsplatShadowCasters = [];
+
+    /**
+     * @type {Set<GSplatPlacement>}
+     * @ignore
+     */
+    gsplatShadowCastersSet = new Set();
+
+    /**
+     * True if the gsplatPlacements array was modified.
+     *
+     * @ignore
+     */
+    gsplatPlacementsDirty = true;
+
+    // --- Composition / shader versioning ---
+
     /**
      * True if the composition is invalidated.
      *
      * @ignore
      */
     _dirtyComposition = false;
+
+    /** @private */
+    _shaderVersion = -1;
+
+    // --- Profiler ---
+
+    // #if _PROFILER
+    skipRenderAfter = Number.MAX_VALUE;
+
+    _skipRenderCounter = 0;
+
+    _renderTime = 0;
+
+    _forwardDrawCalls = 0;
+
+    // deprecated, not useful on a layer anymore, could be moved to camera
+    _shadowDrawCalls = 0;
+    // #endif
 
     /**
      * Create a new Layer instance.
@@ -187,146 +412,81 @@ class Layer {
     constructor(options = {}) {
 
         if (options.id !== undefined) {
-            /**
-             * A unique ID of the layer. Layer IDs are stored inside {@link ModelComponent#layers},
-             * {@link RenderComponent#layers}, {@link CameraComponent#layers},
-             * {@link LightComponent#layers} and {@link ElementComponent#layers} instead of names.
-             * Can be used in {@link LayerComposition#getLayerById}.
-             *
-             * @type {number}
-             */
             this.id = options.id;
             layerCounter = Math.max(this.id + 1, layerCounter);
         } else {
             this.id = layerCounter++;
         }
 
-        /**
-         * Name of the layer. Can be used in {@link LayerComposition#getLayerByName}.
-         *
-         * @type {string}
-         */
         this.name = options.name;
 
-        /**
-         * @type {boolean}
-         * @private
-         */
         this._enabled = options.enabled ?? true;
-        /**
-         * @type {number}
-         * @private
-         */
         this._refCounter = this._enabled ? 1 : 0;
 
-        /**
-         * Defines the method used for sorting opaque (that is, not semi-transparent) mesh
-         * instances before rendering. Can be:
-         *
-         * - {@link SORTMODE_NONE}
-         * - {@link SORTMODE_MANUAL}
-         * - {@link SORTMODE_MATERIALMESH}
-         * - {@link SORTMODE_BACK2FRONT}
-         * - {@link SORTMODE_FRONT2BACK}
-         *
-         * Defaults to {@link SORTMODE_MATERIALMESH}.
-         *
-         * @type {number}
-         */
         this.opaqueSortMode = options.opaqueSortMode ?? SORTMODE_MATERIALMESH;
-
-        /**
-         * Defines the method used for sorting semi-transparent mesh instances before rendering. Can be:
-         *
-         * - {@link SORTMODE_NONE}
-         * - {@link SORTMODE_MANUAL}
-         * - {@link SORTMODE_MATERIALMESH}
-         * - {@link SORTMODE_BACK2FRONT}
-         * - {@link SORTMODE_FRONT2BACK}
-         *
-         * Defaults to {@link SORTMODE_BACK2FRONT}.
-         *
-         * @type {number}
-         */
         this.transparentSortMode = options.transparentSortMode ?? SORTMODE_BACK2FRONT;
 
-        if (options.renderTarget) {
-            this.renderTarget = options.renderTarget;
-        }
-
-        // clear flags
-        /**
-         * @type {boolean}
-         * @private
-         */
         this._clearColorBuffer = !!options.clearColorBuffer;
-
-        /**
-         * @type {boolean}
-         * @private
-         */
         this._clearDepthBuffer = !!options.clearDepthBuffer;
-
-        /**
-         * @type {boolean}
-         * @private
-         */
         this._clearStencilBuffer = !!options.clearStencilBuffer;
 
-        /**
-         * Custom function that is called after the layer has been enabled. This happens when:
-         *
-         * - The layer is created with {@link Layer#enabled} set to true (which is the default value).
-         * - {@link Layer#enabled} was changed from false to true
-         *
-         * @type {Function}
-         */
         this.onEnable = options.onEnable;
-
-        /**
-         * Custom function that is called after the layer has been disabled. This happens when:
-         *
-         * - {@link Layer#enabled} was changed from true to false
-         * - {@link Layer#decrementCounter} was called and set the counter to zero.
-         *
-         * @type {Function}
-         */
         this.onDisable = options.onDisable;
 
         if (this._enabled && this.onEnable) {
             this.onEnable();
         }
+    }
 
-        /**
-         * @type {Function|null}
-         * @ignore
-         */
-        this.customSortCallback = null;
+    /**
+     * Mesh instances assigned to this layer. The cached array is refreshed on access after
+     * removals; callers should use the layer's add/remove methods to change membership.
+     *
+     * @type {MeshInstance[]}
+     * @ignore
+     */
+    get meshInstances() {
+        if (this._meshInstancesDirty) {
+            this._updateMeshInstanceCaches();
+        }
+        return this._meshInstances;
+    }
 
-        /**
-         * @type {Function|null}
-         * @ignore
-         */
-        this.customCalculateSortValues = null;
+    /**
+     * Shadow casting instances assigned to this layer. The cached array is refreshed on access
+     * after removals; callers should use the layer's add/remove methods to change membership.
+     *
+     * @type {MeshInstance[]}
+     * @ignore
+     */
+    get shadowCasters() {
+        if (this._meshInstancesDirty) {
+            this._updateMeshInstanceCaches();
+        }
+        return this._shadowCasters;
+    }
 
-        // light hash based on the light keys
-        this._lightHash = 0;
-        this._lightHashDirty = false;
+    /** @private */
+    _updateMeshInstanceCaches() {
+        let index = 0;
+        for (const meshInstance of this.meshInstancesSet) {
+            this._meshInstances[index++] = meshInstance;
+        }
+        this._meshInstances.length = index;
 
-        // light hash based on light ids
-        this._lightIdHash = 0;
-        this._lightIdHashDirty = false;
+        index = 0;
+        for (const meshInstance of this.shadowCastersSet) {
+            this._shadowCasters[index++] = meshInstance;
+        }
+        this._shadowCasters.length = index;
+        this._meshInstancesDirty = false;
+    }
 
-        // #if _PROFILER
-        this.skipRenderAfter = Number.MAX_VALUE;
-        this._skipRenderCounter = 0;
-
-        this._renderTime = 0;
-        this._forwardDrawCalls = 0;
-        this._shadowDrawCalls = 0;  // deprecated, not useful on a layer anymore, could be moved to camera
-        // #endif
-
-        this._shaderVersion = -1;
+    /** @private */
+    _clearMeshInstanceCaches() {
+        // Release removed instances even if the layer is never rendered or read again.
+        this._meshInstances.length = 0;
+        this._shadowCasters.length = 0;
     }
 
     /**
@@ -337,6 +497,7 @@ class Layer {
     set enabled(val) {
         if (val !== this._enabled) {
             this._dirtyComposition = true;
+            this.gsplatPlacementsDirty = true;
             this._enabled = val;
             if (val) {
                 this.incrementCounter();
@@ -472,6 +633,64 @@ class Layer {
     }
 
     /**
+     * Adds a gsplat placement to this layer.
+     *
+     * @param {GSplatPlacement} placement - A placement of a gsplat.
+     * @ignore
+     */
+    addGSplatPlacement(placement) {
+        if (!this.gsplatPlacementsSet.has(placement)) {
+            this.gsplatPlacements.push(placement);
+            this.gsplatPlacementsSet.add(placement);
+            this.gsplatPlacementsDirty = true;
+        }
+    }
+
+    /**
+     * Removes a gsplat placement from this layer.
+     *
+     * @param {GSplatPlacement} placement - A placement of a gsplat.
+     * @ignore
+     */
+    removeGSplatPlacement(placement) {
+        const index = this.gsplatPlacements.indexOf(placement);
+        if (index >= 0) {
+            this.gsplatPlacements.splice(index, 1);
+            this.gsplatPlacementsSet.delete(placement);
+            this.gsplatPlacementsDirty = true;
+        }
+    }
+
+    /**
+     * Adds a gsplat placement to this layer as a shadow caster.
+     *
+     * @param {GSplatPlacement} placement - A placement of a gsplat.
+     * @ignore
+     */
+    addGSplatShadowCaster(placement) {
+        if (!this.gsplatShadowCastersSet.has(placement)) {
+            this.gsplatShadowCasters.push(placement);
+            this.gsplatShadowCastersSet.add(placement);
+            this.gsplatPlacementsDirty = true;
+        }
+    }
+
+    /**
+     * Removes a gsplat placement from the shadow casters of this layer.
+     *
+     * @param {GSplatPlacement} placement - A placement of a gsplat.
+     * @ignore
+     */
+    removeGSplatShadowCaster(placement) {
+        const index = this.gsplatShadowCasters.indexOf(placement);
+        if (index >= 0) {
+            this.gsplatShadowCasters.splice(index, 1);
+            this.gsplatShadowCastersSet.delete(placement);
+            this.gsplatPlacementsDirty = true;
+        }
+    }
+
+    /**
      * Adds an array of mesh instances to this layer.
      *
      * @param {MeshInstance[]} meshInstances - Array of {@link MeshInstance}.
@@ -480,14 +699,15 @@ class Layer {
      */
     addMeshInstances(meshInstances, skipShadowCasters) {
 
-        const destMeshInstances = this.meshInstances;
+        // Adds do not dirty the caches: append while they are clean, or update only the set if a
+        // removal already dirtied them. Either getter then rebuilds both arrays with those additions.
+        const destMeshInstances = this._meshInstancesDirty ? null : this._meshInstances;
         const destMeshInstancesSet = this.meshInstancesSet;
 
-        // add mesh instances to the layer's array and the set
         for (let i = 0; i < meshInstances.length; i++) {
             const mi = meshInstances[i];
             if (!destMeshInstancesSet.has(mi)) {
-                destMeshInstances.push(mi);
+                destMeshInstances?.push(mi);
                 destMeshInstancesSet.add(mi);
                 _tempMaterials.add(mi.material);
             }
@@ -525,7 +745,6 @@ class Layer {
      */
     removeMeshInstances(meshInstances, skipShadowCasters) {
 
-        const destMeshInstances = this.meshInstances;
         const destMeshInstancesSet = this.meshInstancesSet;
 
         // mesh instances
@@ -533,18 +752,19 @@ class Layer {
             const mi = meshInstances[i];
 
             // remove from mesh instances list
-            if (destMeshInstancesSet.has(mi)) {
-                destMeshInstancesSet.delete(mi);
-                const j = destMeshInstances.indexOf(mi);
-                if (j >= 0) {
-                    destMeshInstances.splice(j, 1);
-                }
+            if (destMeshInstancesSet.delete(mi)) {
+                this._meshInstancesDirty = true;
             }
         }
 
         // shadow casters
         if (!skipShadowCasters) {
             this.removeShadowCasters(meshInstances);
+        }
+
+        // The input can alias either cache, so consume it for both sets before clearing arrays.
+        if (this._meshInstancesDirty) {
+            this._clearMeshInstanceCaches();
         }
     }
 
@@ -555,14 +775,14 @@ class Layer {
      * @param {MeshInstance[]} meshInstances - Array of {@link MeshInstance}.
      */
     addShadowCasters(meshInstances) {
-        const shadowCasters = this.shadowCasters;
+        const shadowCasters = this._meshInstancesDirty ? null : this._shadowCasters;
         const shadowCastersSet = this.shadowCastersSet;
 
         for (let i = 0; i < meshInstances.length; i++) {
             const mi = meshInstances[i];
             if (mi.castShadow && !shadowCastersSet.has(mi)) {
                 shadowCastersSet.add(mi);
-                shadowCasters.push(mi);
+                shadowCasters?.push(mi);
             }
         }
     }
@@ -575,18 +795,17 @@ class Layer {
      * this layer, they will be removed.
      */
     removeShadowCasters(meshInstances) {
-        const shadowCasters = this.shadowCasters;
         const shadowCastersSet = this.shadowCastersSet;
 
         for (let i = 0; i < meshInstances.length; i++) {
             const mi = meshInstances[i];
-            if (shadowCastersSet.has(mi)) {
-                shadowCastersSet.delete(mi);
-                const j = shadowCasters.indexOf(mi);
-                if (j >= 0) {
-                    shadowCasters.splice(j, 1);
-                }
+            if (shadowCastersSet.delete(mi)) {
+                this._meshInstancesDirty = true;
             }
+        }
+
+        if (this._meshInstancesDirty) {
+            this._clearMeshInstanceCaches();
         }
     }
 
@@ -597,12 +816,13 @@ class Layer {
      * instances to cast shadows. Defaults to false, which removes shadow casters as well.
      */
     clearMeshInstances(skipShadowCasters = false) {
-        this.meshInstances.length = 0;
+        this._meshInstances.length = 0;
         this.meshInstancesSet.clear();
 
         if (!skipShadowCasters) {
-            this.shadowCasters.length = 0;
+            this._shadowCasters.length = 0;
             this.shadowCastersSet.clear();
+            this._meshInstancesDirty = false;
         }
     }
 
@@ -689,10 +909,15 @@ class Layer {
                 }
             }
 
-            // sort the lights by their key, as the order of lights is used to generate shader generation key,
-            // and this avoids new shaders being generated when lights are reordered
+            // Order the lights by how broadly they apply, and only then by their key. A light's
+            // position in this list is its light slot, and a mesh instance's shader is built for
+            // the slots its mask selects, so putting the lights that apply to everything first
+            // makes those slots a gap-free run for both masks whenever one mask's lights are a
+            // subset of the other's - which is the normal case. Sorting on the key alone would
+            // scatter them and leave holes. Sorting by the key second keeps the order a pure
+            // function of the set of lights, so reordering lights generates no new shaders.
             for (let i = 0; i < splitLights.length; i++) {
-                splitLights[i].sort((a, b) => a.key - b.key);
+                splitLights[i].sort((a, b) => (lightSlotRank(a) - lightSlotRank(b)) || (a.key - b.key));
             }
         }
 

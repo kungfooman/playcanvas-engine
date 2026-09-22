@@ -24,7 +24,32 @@ import { RENDERSTYLE_SOLID, RENDERSTYLE_WIREFRAME, RENDERSTYLE_POINTS } from './
  * @import { Skin } from './skin.js'
  */
 
+/**
+ * A writable array of numbers - either a JavaScript array or any numeric typed array.
+ *
+ * @typedef {number[]|Int8Array|Uint8Array|Uint8ClampedArray|Int16Array|Uint16Array|Int32Array|Uint32Array|Float32Array|Float64Array} NumericArray
+ */
+
 let id = 0;
+
+/**
+ * Helper function copying the specified number of values from src, which can be an array or a typed
+ * array, into a typed array destination. A typed array source uses the faster TypedArray#set path.
+ *
+ * @param {Int8Array|Uint8Array|Uint8ClampedArray|Int16Array|Uint16Array|Int32Array|Uint32Array|Float32Array|Float64Array} dst
+ * The typed array to copy the values to.
+ * @param {NumericArray} src - The values to copy.
+ * @param {number} numValues - The number of values to copy.
+ */
+const copyToTypedArray = (dst, src, numValues) => {
+    if (ArrayBuffer.isView(src)) {
+        dst.set(numValues === src.length ? src : src.subarray(0, numValues));
+    } else {
+        for (let i = 0; i < numValues; i++) {
+            dst[i] = src[i];
+        }
+    }
+};
 
 // Helper class used to store vertex / index data streams and related properties, when mesh is programmatically modified
 class GeometryData {
@@ -86,7 +111,7 @@ class GeometryVertexStream {
     constructor(data, componentCount, dataType, dataTypeNormalize, asInt) {
         this.data = data;                           // array of data
         this.componentCount = componentCount;       // number of components
-        this.dataType = dataType;                   // format of elements (pc.TYPE_FLOAT32 ..)
+        this.dataType = dataType;                   // format of elements (TYPE_FLOAT32 ..)
         this.dataTypeNormalize = dataTypeNormalize; // normalize element (divide by 255)
         this.asInt = asInt;                         // treat data as integer (WebGL2 and WebGPU only)
     }
@@ -97,19 +122,26 @@ class GeometryVertexStream {
  * {@link IndexBuffer}. It also contains a primitive definition which controls the type of the
  * primitive and the portion of the vertex or index buffer to use.
  *
+ * A mesh holds geometry only. To draw it, pair it with a {@link Material} in a {@link MeshInstance}
+ * and give that instance to a {@link RenderComponent} or a {@link Layer}; one mesh can back any
+ * number of instances. {@link Mesh.fromGeometry} builds a mesh from a {@link Geometry} such as
+ * {@link BoxGeometry} in one call. Meshes are reference counted: every {@link MeshInstance} holds
+ * a reference to its mesh, so call {@link destroy} on a mesh you created only once no instance
+ * uses it.
+ *
  * ## Mesh APIs
  * There are two ways a mesh can be generated or updated.
  *
  * ### Simple Mesh API
- * {@link Mesh} class provides interfaces such as {@link Mesh#setPositions} and {@link Mesh#setUvs}
- * that provide a simple way to provide vertex and index data for the Mesh, and hiding the
- * complexity of creating the {@link VertexFormat}. This is the recommended interface to use.
+ * {@link Mesh} class provides interfaces such as {@link setPositions} and {@link setUvs} that
+ * provide a simple way to provide vertex and index data for the Mesh, and hiding the complexity
+ * of creating the {@link VertexFormat}. This is the recommended interface to use.
  *
  * A simple example which creates a Mesh with 3 vertices, containing position coordinates only, to
  * form a single triangle.
  *
  * ```javascript
- * const mesh = new pc.Mesh(device);
+ * const mesh = new Mesh(device);
  * const positions = [
  *     0, 0, 0, // pos 0
  *     1, 0, 0, // pos 1
@@ -123,7 +155,7 @@ class GeometryVertexStream {
  * channel 0, and an index buffer to form two triangles. Float32Array is used for positions and uvs.
  *
  * ```javascript
- * const mesh = new pc.Mesh(device);
+ * const mesh = new Mesh(device);
  * const positions = new Float32Array([
  *     0, 0, 0, // pos 0
  *     1, 0, 0, // pos 1
@@ -141,7 +173,7 @@ class GeometryVertexStream {
  *     0, 2, 3  // triangle 1
  * ];
  * mesh.setPositions(positions);
- * mesh.setNormals(pc.calculateNormals(positions, indices));
+ * mesh.setNormals(calculateNormals(positions, indices));
  * mesh.setUvs(0, uvs);
  * mesh.setIndices(indices);
  * mesh.update();
@@ -201,15 +233,17 @@ class Mesh extends RefCountedObject {
      *   - {@link PRIMITIVE_TRIFAN}
      *
      * - `base` is the offset of the first index or vertex to dispatch in the draw call.
+     * - `baseVertex` is the number added to each index value before indexing into the vertex buffers. (supported only in WebGPU, ignored in WebGL2)
      * - `count` is the number of indices or vertices to dispatch in the draw call.
      * - `indexed` specifies whether to interpret the primitive as indexed, thereby using the
      * currently set index buffer.
      *
-     * @type {{type: number, base: number, count: number, indexed?: boolean}[]}
+     * @type {{type: number, base: number, baseVertex: number, count: number, indexed?: boolean}[]}
      */
     primitive = [{
         type: 0,
         base: 0,
+        baseVertex: 0,
         count: 0
     }];
 
@@ -238,7 +272,6 @@ class Mesh extends RefCountedObject {
     /**
      * AABB representing object space bounds of the mesh.
      *
-     * @type {BoundingBox}
      * @private
      */
     _aabb = new BoundingBox();
@@ -258,7 +291,6 @@ class Mesh extends RefCountedObject {
     /**
      * True if the created index buffer should be accessible as a storage buffer in compute shader.
      *
-     * @type {boolean}
      * @private
      */
     _storageIndex = false;
@@ -266,7 +298,6 @@ class Mesh extends RefCountedObject {
     /**
      * True if the created vertex buffer should be accessible as a storage buffer in compute shader.
      *
-     * @type {boolean}
      * @private
      */
     _storageVertex = false;
@@ -587,8 +618,8 @@ class Mesh extends RefCountedObject {
     /**
      * Clears the mesh of existing vertices and indices and resets the {@link VertexFormat}
      * associated with the mesh. This call is typically followed by calls to methods such as
-     * {@link Mesh#setPositions}, {@link Mesh#setVertexStream} or {@link Mesh#setIndices} and
-     * finally {@link Mesh#update} to rebuild the mesh, allowing different {@link VertexFormat}.
+     * {@link setPositions}, {@link setVertexStream} or {@link setIndices} and finally
+     * {@link update} to rebuild the mesh, allowing different {@link VertexFormat}.
      *
      * @param {boolean} [verticesDynamic] - Indicates the {@link VertexBuffer} should be created
      * with {@link BUFFER_DYNAMIC} usage. If not specified, {@link BUFFER_STATIC} is used.
@@ -608,8 +639,8 @@ class Mesh extends RefCountedObject {
         this._geometryData.recreate = true;
         this._geometryData.maxVertices = maxVertices;
         this._geometryData.maxIndices = maxIndices;
-        this._geometryData.verticesUsage = verticesDynamic ? BUFFER_STATIC : BUFFER_DYNAMIC;
-        this._geometryData.indicesUsage = indicesDynamic ? BUFFER_STATIC : BUFFER_DYNAMIC;
+        this._geometryData.verticesUsage = verticesDynamic ? BUFFER_DYNAMIC : BUFFER_STATIC;
+        this._geometryData.indicesUsage = indicesDynamic ? BUFFER_DYNAMIC : BUFFER_STATIC;
     }
 
     /**
@@ -617,7 +648,7 @@ class Mesh extends RefCountedObject {
      *
      * @param {string} semantic - The meaning of the vertex element. For supported semantics, see
      * SEMANTIC_* in {@link VertexFormat}.
-     * @param {number[]|ArrayBufferView} data - Vertex data for the specified semantic.
+     * @param {ArrayLike<number>} data - Vertex data for the specified semantic.
      * @param {number} componentCount - The number of values that form a single Vertex element. For
      * example when setting a 3D position represented by 3 numbers per vertex, number 3 should be
      * specified.
@@ -652,7 +683,7 @@ class Mesh extends RefCountedObject {
      *
      * @param {string} semantic - The semantic of the vertex element to get. For supported
      * semantics, see SEMANTIC_* in {@link VertexFormat}.
-     * @param {number[]|ArrayBufferView} data - An array to populate with the vertex data. When
+     * @param {NumericArray} data - An array to populate with the vertex data. When
      * typed array is supplied, enough space needs to be reserved, otherwise only partial data is
      * copied.
      * @returns {number} Returns the number of vertices populated.
@@ -668,13 +699,17 @@ class Mesh extends RefCountedObject {
                 done = true;
                 count = this._geometryData.vertexCount;
 
+                const copyCount = count * stream.componentCount;
                 if (ArrayBuffer.isView(data)) {
-                    // destination data is typed array
-                    data.set(stream.data);
+                    // destination data is typed array, copy as much of the data as it can hold
+                    Debug.assert(data.length >= copyCount, `Destination array is too small to receive all ${semantic} data.`);
+                    copyToTypedArray(data, stream.data, Math.min(data.length, copyCount));
                 } else {
                     // destination data is array
                     data.length = 0;
-                    data.push(stream.data);
+                    for (let i = 0; i < copyCount; i++) {
+                        data[i] = stream.data[i];
+                    }
                 }
             }
         }
@@ -694,7 +729,7 @@ class Mesh extends RefCountedObject {
     /**
      * Sets the vertex positions array. Vertices are stored using {@link TYPE_FLOAT32} format.
      *
-     * @param {number[]|ArrayBufferView} positions - Vertex data containing positions.
+     * @param {ArrayLike<number>} positions - Vertex data containing positions.
      * @param {number} [componentCount] - The number of values that form a single position element.
      * Defaults to 3 if not specified, corresponding to x, y and z coordinates.
      * @param {number} [numVertices] - The number of vertices to be used from data array. If not
@@ -707,7 +742,7 @@ class Mesh extends RefCountedObject {
     /**
      * Sets the vertex normals array. Normals are stored using {@link TYPE_FLOAT32} format.
      *
-     * @param {number[]|ArrayBufferView} normals - Vertex data containing normals.
+     * @param {ArrayLike<number>} normals - Vertex data containing normals.
      * @param {number} [componentCount] - The number of values that form a single normal element.
      * Defaults to 3 if not specified, corresponding to x, y and z direction.
      * @param {number} [numVertices] - The number of vertices to be used from data array. If not
@@ -721,7 +756,7 @@ class Mesh extends RefCountedObject {
      * Sets the vertex uv array. Uvs are stored using {@link TYPE_FLOAT32} format.
      *
      * @param {number} channel - The uv channel in [0..7] range.
-     * @param {number[]|ArrayBufferView} uvs - Vertex data containing uv-coordinates.
+     * @param {ArrayLike<number>} uvs - Vertex data containing uv-coordinates.
      * @param {number} [componentCount] - The number of values that form a single uv element.
      * Defaults to 2 if not specified, corresponding to u and v coordinates.
      * @param {number} [numVertices] - The number of vertices to be used from data array. If not
@@ -735,7 +770,7 @@ class Mesh extends RefCountedObject {
      * Sets the vertex color array. Colors are stored using {@link TYPE_FLOAT32} format, which is
      * useful for HDR colors.
      *
-     * @param {number[]|ArrayBufferView} colors - Vertex data containing colors.
+     * @param {ArrayLike<number>} colors - Vertex data containing colors.
      * @param {number} [componentCount] - The number of values that form a single color element.
      * Defaults to 4 if not specified, corresponding to r, g, b and a.
      * @param {number} [numVertices] - The number of vertices to be used from data array. If not
@@ -750,7 +785,7 @@ class Mesh extends RefCountedObject {
      * useful for LDR colors. Values in the array are expected in [0..255] range, and are mapped to
      * [0..1] range in the shader.
      *
-     * @param {number[]|ArrayBufferView} colors - Vertex data containing colors. The array is
+     * @param {ArrayLike<number>} colors - Vertex data containing colors. The array is
      * expected to contain 4 components per vertex, corresponding to r, g, b and a.
      * @param {number} [numVertices] - The number of vertices to be used from data array. If not
      * provided, the whole data array is used. This allows to use only part of the data array.
@@ -778,7 +813,7 @@ class Mesh extends RefCountedObject {
     /**
      * Gets the vertex positions data.
      *
-     * @param {number[]|ArrayBufferView} positions - An array to populate with the vertex data.
+     * @param {NumericArray} positions - An array to populate with the vertex data.
      * When typed array is supplied, enough space needs to be reserved, otherwise only partial data
      * is copied.
      * @returns {number} Returns the number of vertices populated.
@@ -790,7 +825,7 @@ class Mesh extends RefCountedObject {
     /**
      * Gets the vertex normals data.
      *
-     * @param {number[]|ArrayBufferView} normals - An array to populate with the vertex data. When
+     * @param {NumericArray} normals - An array to populate with the vertex data. When
      * typed array is supplied, enough space needs to be reserved, otherwise only partial data is
      * copied.
      * @returns {number} Returns the number of vertices populated.
@@ -803,7 +838,7 @@ class Mesh extends RefCountedObject {
      * Gets the vertex uv data.
      *
      * @param {number} channel - The uv channel in [0..7] range.
-     * @param {number[]|ArrayBufferView} uvs - An array to populate with the vertex data. When
+     * @param {NumericArray} uvs - An array to populate with the vertex data. When
      * typed array is supplied, enough space needs to be reserved, otherwise only partial data is
      * copied.
      * @returns {number} Returns the number of vertices populated.
@@ -815,7 +850,7 @@ class Mesh extends RefCountedObject {
     /**
      * Gets the vertex color data.
      *
-     * @param {number[]|ArrayBufferView} colors - An array to populate with the vertex data. When
+     * @param {NumericArray} colors - An array to populate with the vertex data. When
      * typed array is supplied, enough space needs to be reserved, otherwise only partial data is
      * copied.
      * @returns {number} Returns the number of vertices populated.
@@ -841,13 +876,14 @@ class Mesh extends RefCountedObject {
             count = this._geometryData.indexCount;
 
             if (ArrayBuffer.isView(indices)) {
-                // destination data is typed array
-                indices.set(streamIndices);
+                // destination data is typed array, copy as much of the data as it can hold
+                Debug.assert(indices.length >= count, 'Destination array is too small to receive all index data.');
+                copyToTypedArray(indices, streamIndices, Math.min(indices.length, count));
             } else {
                 // destination data is array
                 indices.length = 0;
-                for (let i = 0, il = streamIndices.length; i < il; i++) {
-                    indices.push(streamIndices[i]);
+                for (let i = 0; i < count; i++) {
+                    indices[i] = streamIndices[i];
                 }
             }
         } else {
@@ -866,7 +902,7 @@ class Mesh extends RefCountedObject {
      * {@link vertexBuffer} or {@link indexBuffer} to fit all provided vertices and indices, and
      * fills them with data.
      *
-     * @param {number} [primitiveType] - The type of primitive to render.  Can be:
+     * @param {number} [primitiveType] - The type of primitive to render. Can be:
      *
      * - {@link PRIMITIVE_POINTS}
      * - {@link PRIMITIVE_LINES}
@@ -879,9 +915,9 @@ class Mesh extends RefCountedObject {
      * Defaults to {@link PRIMITIVE_TRIANGLES} if not specified.
      * @param {boolean} [updateBoundingBox] - True to update bounding box. Bounding box is updated
      * only if positions were set since last time update was called, and `componentCount` for
-     * position was 3, otherwise bounding box is not updated. See {@link Mesh#setPositions}.
-     * Defaults to true if not specified. Set this to false to avoid update of the bounding box and
-     * use aabb property to set it instead.
+     * position was 3, otherwise bounding box is not updated. See {@link setPositions}. Defaults to
+     * true if not specified. Set this to false to avoid update of the bounding box and use aabb
+     * property to set it instead.
      */
     update(primitiveType = PRIMITIVE_TRIANGLES, updateBoundingBox = true) {
 
@@ -1044,6 +1080,7 @@ class Mesh extends RefCountedObject {
             this.primitive[RENDERSTYLE_POINTS] = {
                 type: PRIMITIVE_POINTS,
                 base: 0,
+                baseVertex: 0,
                 count: this.vertexBuffer ? this.vertexBuffer.numVertices : 0,
                 indexed: false
             };
@@ -1069,45 +1106,66 @@ class Mesh extends RefCountedObject {
 
         const numVertices = this.vertexBuffer.numVertices;
 
-        const lines = [];
+        let lines;
         let format;
+
         if (this.indexBuffer.length > 0 && this.indexBuffer[0]) {
             const offsets = [[0, 1], [1, 2], [2, 0]];
 
             const base = this.primitive[RENDERSTYLE_SOLID].base;
             const count = this.primitive[RENDERSTYLE_SOLID].count;
+            const baseVertex = this.primitive[RENDERSTYLE_SOLID].baseVertex || 0;
             const indexBuffer = this.indexBuffer[RENDERSTYLE_SOLID];
-            const srcIndices = new typedArrayIndexFormats[indexBuffer.format](indexBuffer.storage);
-
+            const indicesArrayType = typedArrayIndexFormats[indexBuffer.format];
+            const srcIndices = new indicesArrayType(indexBuffer.storage);
+            const tmpIndices = new indicesArrayType(count * 2);
             const seen = new Set();
+
+            let len = 0;
 
             for (let j = base; j < base + count; j += 3) {
                 for (let k = 0; k < 3; k++) {
-                    const i1 = srcIndices[j + offsets[k][0]];
-                    const i2 = srcIndices[j + offsets[k][1]];
+                    const i1 = srcIndices[j + offsets[k][0]] + baseVertex;
+                    const i2 = srcIndices[j + offsets[k][1]] + baseVertex;
                     const hash = (i1 > i2) ? ((i2 * numVertices) + i1) : ((i1 * numVertices) + i2);
                     if (!seen.has(hash)) {
                         seen.add(hash);
-                        lines.push(i1, i2);
+                        tmpIndices[len++] = i1;
+                        tmpIndices[len++] = i2;
                     }
                 }
             }
+
+            seen.clear();
+
             format = indexBuffer.format;
+            lines = tmpIndices.slice(0, len);
+
         } else {
-            for (let i = 0; i < numVertices; i += 3) {
-                lines.push(i, i + 1, i + 1, i + 2, i + 2, i);
+            const safeNumVertices = numVertices - (numVertices % 3);
+            const count = (safeNumVertices / 3) * 6;
+
+            format = count > 65535 ? INDEXFORMAT_UINT32 : INDEXFORMAT_UINT16;
+            lines = count > 65535 ? new Uint32Array(count) : new Uint16Array(count);
+
+            let idx = 0;
+
+            for (let i = 0; i < safeNumVertices; i += 3) {
+                lines[idx++] = i;
+                lines[idx++] = i + 1;
+                lines[idx++] = i + 1;
+                lines[idx++] = i + 2;
+                lines[idx++] = i + 2;
+                lines[idx++] = i;
             }
-            format = lines.length > 65535 ? INDEXFORMAT_UINT32 : INDEXFORMAT_UINT16;
         }
 
-        const wireBuffer = new IndexBuffer(this.vertexBuffer.device, format, lines.length);
-        const dstIndices = new typedArrayIndexFormats[wireBuffer.format](wireBuffer.storage);
-        dstIndices.set(lines);
-        wireBuffer.unlock();
+        const wireBuffer = new IndexBuffer(this.vertexBuffer.device, format, lines.length, BUFFER_STATIC, lines.buffer);
 
         this.primitive[RENDERSTYLE_WIREFRAME] = {
             type: PRIMITIVE_LINES,
             base: 0,
+            baseVertex: 0,
             count: lines.length,
             indexed: true
         };

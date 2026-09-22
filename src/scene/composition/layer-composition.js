@@ -9,12 +9,33 @@ import { RenderAction } from './render-action.js';
 /**
  * @import { CameraComponent } from '../../framework/components/camera/component.js'
  * @import { Layer } from '../layer.js'
+ * @import { Camera } from '../camera.js'
  */
 
 /**
  * Layer Composition is a collection of {@link Layer} that is fed to {@link Scene#layers} to define
  * rendering order.
  *
+ * Each layer is rendered as two parts, its opaque mesh instances and its transparent ones, and
+ * {@link layerList} holds the sequence of parts in the order they are drawn. {@link push} and
+ * {@link insert} add both parts of a layer together, while {@link pushOpaque},
+ * {@link pushTransparent}, {@link insertOpaque} and {@link insertTransparent} place one part at a
+ * time, which is how the default composition places the depth and skybox layers between the world's
+ * opaque and transparent parts. Look layers up with {@link getLayerById} and
+ * {@link getLayerByName}, find where a part sits with {@link getOpaqueIndex} and
+ * {@link getTransparentIndex}, and take a layer out with {@link remove}. The composition fires
+ * `add` and `remove` as layers come and go.
+ *
+ * The composition the application creates ends with the UI layer, so a pushed layer renders after
+ * the UI and outside the range a camera's post-processing applies to. To render inside that range,
+ * insert at an index taken from {@link getOpaqueIndex} or {@link getTransparentIndex}.
+ *
+ * @example
+ * // Draw decals right after the world's opaque objects and before its transparent ones
+ * const layers = app.scene.layers;
+ * const world = layers.getLayerById(LAYERID_WORLD);
+ * const decals = new Layer({ name: 'Decals' });
+ * layers.insertOpaque(decals, layers.getOpaqueIndex(world) + 1);
  * @category Graphics
  */
 class LayerComposition extends EventHandler {
@@ -44,7 +65,7 @@ class LayerComposition extends EventHandler {
     layerNameMap = new Map();
 
     /**
-     * A mapping of {@link Layer} to its opaque index in {@link LayerComposition#layerList}.
+     * A mapping of {@link Layer} to its opaque index in {@link layerList}.
      *
      * @type {Map<Layer, number>}
      * @ignore
@@ -52,7 +73,7 @@ class LayerComposition extends EventHandler {
     layerOpaqueIndexMap = new Map();
 
     /**
-     * A mapping of {@link Layer} to its transparent index in {@link LayerComposition#layerList}.
+     * A mapping of {@link Layer} to its transparent index in {@link layerList}.
      *
      * @type {Map<Layer, number>}
      * @ignore
@@ -60,7 +81,7 @@ class LayerComposition extends EventHandler {
     layerTransparentIndexMap = new Map();
 
     /**
-     * A read-only array of boolean values, matching {@link LayerComposition#layerList}. True means only
+     * A read-only array of boolean values, matching {@link layerList}. True means only
      * semi-transparent objects are rendered, and false means opaque.
      *
      * @type {boolean[]}
@@ -69,7 +90,7 @@ class LayerComposition extends EventHandler {
     subLayerList = [];
 
     /**
-     * A read-only array of boolean values, matching {@link LayerComposition#layerList}. True means the
+     * A read-only array of boolean values, matching {@link layerList}. True means the
      * layer is rendered, false means it's skipped.
      *
      * @type {boolean[]}
@@ -83,6 +104,14 @@ class LayerComposition extends EventHandler {
      * @ignore
      */
     cameras = [];
+
+    /**
+     * A set of {@link Camera}s.
+     *
+     * @type {Set<Camera>}
+     * @ignore
+     */
+    camerasSet = new Set();
 
     /**
      * The actual rendering sequence, generated based on layers and cameras
@@ -114,15 +143,6 @@ class LayerComposition extends EventHandler {
         this._transparentOrder = {};
     }
 
-    destroy() {
-        this.destroyRenderActions();
-    }
-
-    destroyRenderActions() {
-        this._renderActions.forEach(ra => ra.destroy());
-        this._renderActions.length = 0;
-    }
-
     markDirty() {
         this._dirty = true;
     }
@@ -146,16 +166,17 @@ class LayerComposition extends EventHandler {
 
             // walk the layers and build an array of unique cameras from all layers
             this.cameras.length = 0;
+            this.camerasSet.clear();
             for (let i = 0; i < len; i++) {
                 const layer = this.layerList[i];
                 layer._dirtyComposition = false;
 
                 // for all cameras in the layer
                 for (let j = 0; j < layer.cameras.length; j++) {
-                    const camera = layer.cameras[j];
-                    const index = this.cameras.indexOf(camera);
-                    if (index < 0) {
-                        this.cameras.push(camera);
+                    const cameraComponent = layer.cameras[j];
+                    if (!this.camerasSet.has(cameraComponent.camera)) {
+                        this.camerasSet.add(cameraComponent.camera);
+                        this.cameras.push(cameraComponent);
                     }
                 }
             }
@@ -170,15 +191,15 @@ class LayerComposition extends EventHandler {
 
             // render in order of cameras sorted by priority
             let renderActionCount = 0;
-            this.destroyRenderActions();
+            this._renderActions.length = 0;
 
             for (let i = 0; i < this.cameras.length; i++) {
                 const camera = this.cameras[i];
                 cameraLayers.length = 0;
 
-                // if the camera uses custom render passes, only add a dummy render action to mark
+                // if the camera defines frame passes, only add a dummy render action to mark
                 // the place where to add them during building of the frame graph
-                if (camera.camera.renderPasses.length > 0) {
+                if (camera.camera.framePasses.length > 0) {
                     this.addDummyRenderAction(renderActionCount, camera);
                     renderActionCount++;
                     continue;
@@ -332,7 +353,7 @@ class LayerComposition extends EventHandler {
                 continue;
             }
 
-            // end of stacking if camera with custom render passes
+            // end of stacking if camera with custom frame passes
             if (ra.useCameraPasses) {
                 break;
             }
@@ -374,8 +395,6 @@ class LayerComposition extends EventHandler {
                         (enabled ? ' ENABLED ' : ' DISABLED') +
                         (` RT: ${ra.renderTarget ? ra.renderTarget.name : '-'}`).padEnd(30, ' ')
                     } Clear: ${clear
-                    }${ra.firstCameraUse ? ' CAM-FIRST' : ''
-                    }${ra.lastCameraUse ? ' CAM-LAST' : ''
                     }${ra.triggerPostprocess ? ' POSTPROCESS' : ''}`
                     );
                 }
@@ -402,7 +421,12 @@ class LayerComposition extends EventHandler {
     // Whole layer API
 
     /**
-     * Adds a layer (both opaque and semi-transparent parts) to the end of the {@link LayerComposition#layerList}.
+     * Adds a layer (both opaque and semi-transparent parts) to the end of the {@link layerList}.
+     *
+     * The default composition ends with the UI layer, so a layer pushed here renders after the UI
+     * and after the last layer a camera's post-processing applies to. To place a layer inside the
+     * post-processed range instead, use {@link LayerComposition#insert} with an index from
+     * {@link LayerComposition#getOpaqueIndex}.
      *
      * @param {Layer} layer - A {@link Layer} to add.
      */
@@ -423,7 +447,7 @@ class LayerComposition extends EventHandler {
 
     /**
      * Inserts a layer (both opaque and semi-transparent parts) at the chosen index in the
-     * {@link LayerComposition#layerList}.
+     * {@link layerList}.
      *
      * @param {Layer} layer - A {@link Layer} to add.
      * @param {number} index - Insertion position.
@@ -445,7 +469,7 @@ class LayerComposition extends EventHandler {
     }
 
     /**
-     * Removes a layer (both opaque and semi-transparent parts) from {@link LayerComposition#layerList}.
+     * Removes a layer (both opaque and semi-transparent parts) from {@link layerList}.
      *
      * @param {Layer} layer - A {@link Layer} to remove.
      */
@@ -476,7 +500,7 @@ class LayerComposition extends EventHandler {
 
     /**
      * Adds part of the layer with opaque (non semi-transparent) objects to the end of the
-     * {@link LayerComposition#layerList}.
+     * {@link layerList}.
      *
      * @param {Layer} layer - A {@link Layer} to add.
      */
@@ -494,7 +518,7 @@ class LayerComposition extends EventHandler {
 
     /**
      * Inserts an opaque part of the layer (non semi-transparent mesh instances) at the chosen
-     * index in the {@link LayerComposition#layerList}.
+     * index in the {@link layerList}.
      *
      * @param {Layer} layer - A {@link Layer} to add.
      * @param {number} index - Insertion position.
@@ -517,7 +541,7 @@ class LayerComposition extends EventHandler {
 
     /**
      * Removes an opaque part of the layer (non semi-transparent mesh instances) from
-     * {@link LayerComposition#layerList}.
+     * {@link layerList}.
      *
      * @param {Layer} layer - A {@link Layer} to remove.
      */
@@ -543,7 +567,7 @@ class LayerComposition extends EventHandler {
     }
 
     /**
-     * Adds part of the layer with semi-transparent objects to the end of the {@link LayerComposition#layerList}.
+     * Adds part of the layer with semi-transparent objects to the end of the {@link layerList}.
      *
      * @param {Layer} layer - A {@link Layer} to add.
      */
@@ -560,7 +584,7 @@ class LayerComposition extends EventHandler {
     }
 
     /**
-     * Inserts a semi-transparent part of the layer at the chosen index in the {@link LayerComposition#layerList}.
+     * Inserts a semi-transparent part of the layer at the chosen index in the {@link layerList}.
      *
      * @param {Layer} layer - A {@link Layer} to add.
      * @param {number} index - Insertion position.
@@ -582,7 +606,7 @@ class LayerComposition extends EventHandler {
     }
 
     /**
-     * Removes a transparent part of the layer from {@link LayerComposition#layerList}.
+     * Removes a transparent part of the layer from {@link layerList}.
      *
      * @param {Layer} layer - A {@link Layer} to remove.
      */
@@ -608,7 +632,7 @@ class LayerComposition extends EventHandler {
     }
 
     /**
-     * Gets index of the opaque part of the supplied layer in the {@link LayerComposition#layerList}.
+     * Gets index of the opaque part of the supplied layer in the {@link layerList}.
      *
      * @param {Layer} layer - A {@link Layer} to find index of.
      * @returns {number} The index of the opaque part of the specified layer, or -1 if it is not
@@ -619,7 +643,7 @@ class LayerComposition extends EventHandler {
     }
 
     /**
-     * Gets index of the semi-transparent part of the supplied layer in the {@link LayerComposition#layerList}.
+     * Gets index of the semi-transparent part of the supplied layer in the {@link layerList}.
      *
      * @param {Layer} layer - A {@link Layer} to find index of.
      * @returns {number} The index of the semi-transparent part of the specified layer, or -1 if it
@@ -637,6 +661,21 @@ class LayerComposition extends EventHandler {
             }
         }
         return false;
+    }
+
+    /**
+     * Returns true if the sub-layer at the given flat {@link LayerComposition#layerList} index is
+     * enabled and rendered by the given camera. Combines the per-layer enabled flag, the per
+     * sub-layer enabled flag and the layer's set of cameras.
+     *
+     * @param {number} index - The index of the sub-layer in {@link LayerComposition#layerList}.
+     * @param {Camera} camera - The camera to test.
+     * @returns {boolean} True if the sub-layer is enabled and the camera renders it.
+     * @ignore
+     */
+    isSubLayerRenderedByCamera(index, camera) {
+        const layer = this.layerList[index];
+        return layer.enabled && this.subLayerEnabled[index] && layer.camerasSet.has(camera);
     }
 
     /**

@@ -112,6 +112,38 @@ export const BLENDMODE_CONSTANT = 11;
 export const BLENDMODE_ONE_MINUS_CONSTANT = 12;
 
 /**
+ * Multiply all fragment components by the components of the secondary source fragment. This can
+ * only be used when {@link GraphicsDevice#supportsDualSourceBlending} is true.
+ *
+ * @category Graphics
+ */
+export const BLENDMODE_SRC1_COLOR = 13;
+
+/**
+ * Multiply all fragment components by one minus the components of the secondary source fragment.
+ * This can only be used when {@link GraphicsDevice#supportsDualSourceBlending} is true.
+ *
+ * @category Graphics
+ */
+export const BLENDMODE_ONE_MINUS_SRC1_COLOR = 14;
+
+/**
+ * Multiply all fragment components by the alpha value of the secondary source fragment. This can
+ * only be used when {@link GraphicsDevice#supportsDualSourceBlending} is true.
+ *
+ * @category Graphics
+ */
+export const BLENDMODE_SRC1_ALPHA = 15;
+
+/**
+ * Multiply all fragment components by one minus the alpha value of the secondary source fragment.
+ * This can only be used when {@link GraphicsDevice#supportsDualSourceBlending} is true.
+ *
+ * @category Graphics
+ */
+export const BLENDMODE_ONE_MINUS_SRC1_ALPHA = 16;
+
+/**
  * Add the results of the source and destination fragment multiplies.
  *
  * @category Graphics
@@ -252,6 +284,20 @@ export const BUFFER_STREAM = 2;
 export const BUFFER_GPUDYNAMIC = 3;
 
 /**
+ * Captures all varyings into one interleaved transform feedback buffer.
+ *
+ * @category Graphics
+ */
+export const TRANSFORM_FEEDBACK_INTERLEAVED = 0;
+
+/**
+ * Captures each varying into its own transform feedback buffer.
+ *
+ * @category Graphics
+ */
+export const TRANSFORM_FEEDBACK_SEPARATE = 1;
+
+/**
  * Clear the color buffer.
  *
  * @category Graphics
@@ -315,6 +361,61 @@ export const CUBEFACE_POSZ = 4;
 export const CUBEFACE_NEGZ = 5;
 
 /**
+ * The render target stores the image with row 0 being the top row of the rendered image, on all
+ * graphics APIs - the same layout image textures use. See the `origin` option of the
+ * {@link RenderTarget} constructor for guidance on which origin to use.
+ *
+ * @category Graphics
+ */
+export const RENDERTARGET_ORIGIN_TOP = 'top';
+
+/**
+ * The render target stores the image with row 0 being the bottom row of the rendered image, on
+ * all graphics APIs - replicating WebGL2's native layout. See the `origin` option of the
+ * {@link RenderTarget} constructor for guidance on which origin to use.
+ *
+ * @category Graphics
+ */
+export const RENDERTARGET_ORIGIN_BOTTOM = 'bottom';
+
+/**
+ * The render target stores the image in the native orientation of the graphics API - bottom-up
+ * on WebGL2, top-down on WebGPU - so the stored row order differs between the APIs. This is the
+ * default. See the `origin` option of the {@link RenderTarget} constructor for guidance on which
+ * origin to use.
+ *
+ * @category Graphics
+ */
+export const RENDERTARGET_ORIGIN_NATIVE = 'native';
+
+/**
+ * The depth value of the multisampled depth buffer is resolved by taking its sample at index 0.
+ * See {@link RenderTarget#depthResolveMode}.
+ *
+ * @category Graphics
+ */
+export const DEPTHRESOLVE_SAMPLE0 = 'sample0';
+
+/**
+ * The depth value of the multisampled depth buffer is resolved by taking the minimum value of all
+ * samples - with a standard depth buffer this selects the nearest surface, which is a conservative
+ * and stable choice for depth-consuming effects. This is the default. See
+ * {@link RenderTarget#depthResolveMode}.
+ *
+ * @category Graphics
+ */
+export const DEPTHRESOLVE_MIN = 'min';
+
+/**
+ * The depth value of the multisampled depth buffer is resolved by taking the maximum value of all
+ * samples - with a standard depth buffer this selects the farthest surface. See
+ * {@link RenderTarget#depthResolveMode}.
+ *
+ * @category Graphics
+ */
+export const DEPTHRESOLVE_MAX = 'max';
+
+/**
  * No triangles are culled.
  *
  * @category Graphics
@@ -343,6 +444,20 @@ export const CULLFACE_FRONT = 2;
  * @category Graphics
  */
 export const CULLFACE_FRONTANDBACK = 3;
+
+/**
+ * The counterclockwise winding. Specifies whether polygons are front- or back-facing by setting a winding orientation.
+ *
+ * @category Graphics
+ */
+export const FRONTFACE_CCW = 0;
+
+/**
+ * The clockwise winding. Specifies whether polygons are front- or back-facing by setting a winding orientation.
+ *
+ * @category Graphics
+ */
+export const FRONTFACE_CW = 1;
 
 /**
  * Point sample filtering.
@@ -462,6 +577,14 @@ export const INDEXFORMAT_UINT16 = 1;
  * @category Graphics
  */
 export const INDEXFORMAT_UINT32 = 2;
+
+/**
+ * Byte size of index formats.
+ *
+ * @category Graphics
+ * @ignore
+ */
+export const indexFormatByteSize = [1, 2, 4];
 
 export const PIXELFORMAT_A8 = 0;
 export const PIXELFORMAT_L8 = 1;
@@ -919,43 +1042,91 @@ export const PIXELFORMAT_BC7_SRGBA = 68;
 export const PIXELFORMAT_DEPTH16 = 69;
 
 /**
+ * 32-bit floating point RG (32-bit float for each red and green channels). WebGPU only.
+ *
+ * @category Graphics
+ */
+export const PIXELFORMAT_RG32F = 70;
+
+/**
+ * 32-bit RGB format with shared 5-bit exponent (9 bits each for RGB mantissa). HDR format.
+ *
+ * @category Graphics
+ */
+export const PIXELFORMAT_RGB9E5 = 71;
+
+/**
+ * 8-bit per-channel signed normalized (RG) format.
+ *
+ * @category Graphics
+ */
+export const PIXELFORMAT_RG8S = 72;
+
+/**
+ * 8-bit per-channel signed normalized (RGBA) format.
+ *
+ * @category Graphics
+ */
+export const PIXELFORMAT_RGBA8S = 73;
+
+/**
+ * 10-bit RGB with 2-bit alpha unsigned normalized format.
+ *
+ * @category Graphics
+ */
+export const PIXELFORMAT_RGB10A2 = 74;
+
+/**
+ * 10-bit RGB with 2-bit alpha unsigned integer format.
+ *
+ * @category Graphics
+ */
+export const PIXELFORMAT_RGB10A2U = 75;
+
+/**
  * Information about pixel formats.
  *
  * ldr: whether the format is low dynamic range (LDR), which typically means it's not HDR, and uses
  * sRGB color space to store the color values
  * srgbFormat: the corresponding sRGB format (which automatically converts the sRGB value to linear)
  *
- * @type {Map<number, { name: string, size?: number, blockSize?: number, ldr?: boolean, srgb?: boolean, srgbFormat?: number, isInt?: boolean }>}
+ * @type {Map<number, { name: string, size?: number, blockSize?: number, ldr?: boolean, srgb?: boolean, srgbFormat?: number, isInt?: boolean, isUint?: boolean }>}
  * @ignore
  */
 export const pixelFormatInfo = new Map([
 
     // float formats
     [PIXELFORMAT_A8,            { name: 'A8', size: 1, ldr: true }],
-    [PIXELFORMAT_R8,            { name: 'R8', size: 1, ldr: true }],
+    [PIXELFORMAT_R8,            { name: 'R8', size: 1, ldr: true, msaa: true, msaaResolve: true }],
     [PIXELFORMAT_L8,            { name: 'L8', size: 1, ldr: true }],
     [PIXELFORMAT_LA8,           { name: 'LA8', size: 2, ldr: true }],
-    [PIXELFORMAT_RG8,           { name: 'RG8', size: 2, ldr: true }],
+    [PIXELFORMAT_RG8,           { name: 'RG8', size: 2, ldr: true, msaa: true, msaaResolve: true }],
     [PIXELFORMAT_RGB565,        { name: 'RGB565', size: 2, ldr: true }],
     [PIXELFORMAT_RGBA5551,      { name: 'RGBA5551', size: 2, ldr: true }],
     [PIXELFORMAT_RGBA4,         { name: 'RGBA4', size: 2, ldr: true }],
-    [PIXELFORMAT_RGB8,          { name: 'RGB8', size: 4, ldr: true }],
-    [PIXELFORMAT_RGBA8,         { name: 'RGBA8', size: 4, ldr: true, srgbFormat: PIXELFORMAT_SRGBA8 }],
-    [PIXELFORMAT_R16F,          { name: 'R16F', size: 2 }],
-    [PIXELFORMAT_RG16F,         { name: 'RG16F', size: 4 }],
+    [PIXELFORMAT_RGB8,          { name: 'RGB8', size: 4, ldr: true, msaa: true, msaaResolve: true }],
+    [PIXELFORMAT_RGBA8,         { name: 'RGBA8', size: 4, ldr: true, srgbFormat: PIXELFORMAT_SRGBA8, msaa: true, msaaResolve: true }],
+    [PIXELFORMAT_R16F,          { name: 'R16F', size: 2, msaa: true, msaaResolve: true }],
+    [PIXELFORMAT_RG16F,         { name: 'RG16F', size: 4, msaa: true, msaaResolve: true }],
     [PIXELFORMAT_RGB16F,        { name: 'RGB16F', size: 8 }],
-    [PIXELFORMAT_RGBA16F,       { name: 'RGBA16F', size: 8 }],
+    [PIXELFORMAT_RGBA16F,       { name: 'RGBA16F', size: 8, msaa: true, msaaResolve: true }],
     [PIXELFORMAT_RGB32F,        { name: 'RGB32F', size: 16 }],
     [PIXELFORMAT_RGBA32F,       { name: 'RGBA32F', size: 16 }],
-    [PIXELFORMAT_R32F,          { name: 'R32F', size: 4 }],
-    [PIXELFORMAT_DEPTH,         { name: 'DEPTH', size: 4 }],
-    [PIXELFORMAT_DEPTH16,       { name: 'DEPTH16', size: 2 }],
-    [PIXELFORMAT_DEPTHSTENCIL,  { name: 'DEPTHSTENCIL', size: 4 }],
-    [PIXELFORMAT_111110F,       { name: '111110F', size: 4 }],
+    [PIXELFORMAT_R32F,          { name: 'R32F', size: 4, msaa: true }],
+    [PIXELFORMAT_RG32F,         { name: 'RG32F', size: 8 }],
+    [PIXELFORMAT_RGB9E5,        { name: 'RGB9E5', size: 4 }],
+    [PIXELFORMAT_RG8S,          { name: 'RG8S', size: 2 }],
+    [PIXELFORMAT_RGBA8S,        { name: 'RGBA8S', size: 4 }],
+    [PIXELFORMAT_RGB10A2,       { name: 'RGB10A2', size: 4, msaa: true, msaaResolve: true }],
+    [PIXELFORMAT_RGB10A2U,      { name: 'RGB10A2U', size: 4, isUint: true, msaa: true }],
+    [PIXELFORMAT_DEPTH,         { name: 'DEPTH', size: 4, msaa: true }],
+    [PIXELFORMAT_DEPTH16,       { name: 'DEPTH16', size: 2, msaa: true }],
+    [PIXELFORMAT_DEPTHSTENCIL,  { name: 'DEPTHSTENCIL', size: 4, msaa: true }],
+    [PIXELFORMAT_111110F,       { name: '111110F', size: 4, msaa: true, msaaResolve: true }],
     [PIXELFORMAT_SRGB8,         { name: 'SRGB8', size: 4, ldr: true, srgb: true }],
-    [PIXELFORMAT_SRGBA8,        { name: 'SRGBA8', size: 4, ldr: true, srgb: true }],
-    [PIXELFORMAT_BGRA8,         { name: 'BGRA8', size: 4, ldr: true }],
-    [PIXELFORMAT_SBGRA8,        { name: 'SBGRA8', size: 4, ldr: true, srgb: true }],
+    [PIXELFORMAT_SRGBA8,        { name: 'SRGBA8', size: 4, ldr: true, srgb: true, msaa: true, msaaResolve: true }],
+    [PIXELFORMAT_BGRA8,         { name: 'BGRA8', size: 4, ldr: true, msaa: true, msaaResolve: true }],
+    [PIXELFORMAT_SBGRA8,        { name: 'SBGRA8', size: 4, ldr: true, srgb: true, msaa: true, msaaResolve: true }],
 
     // compressed formats
     [PIXELFORMAT_DXT1,              { name: 'DXT1', blockSize: 8, ldr: true, srgbFormat: PIXELFORMAT_DXT1_SRGB }],
@@ -984,25 +1155,27 @@ export const pixelFormatInfo = new Map([
     [PIXELFORMAT_ASTC_4x4_SRGB,      { name: 'ASTC_4x4_SRGB', blockSize: 16, ldr: true, srgb: true }],
     [PIXELFORMAT_BC7_SRGBA,          { name: 'BC7_SRGBA', blockSize: 16, ldr: true, srgb: true }],
 
-    // integer formats
-    [PIXELFORMAT_R8I,      { name: 'R8I', size: 1, isInt: true }],
-    [PIXELFORMAT_R8U,      { name: 'R8U', size: 1, isInt: true }],
-    [PIXELFORMAT_R16I,     { name: 'R16I', size: 2, isInt: true }],
-    [PIXELFORMAT_R16U,     { name: 'R16U', size: 2, isInt: true }],
+    // signed integer formats
+    [PIXELFORMAT_R8I,      { name: 'R8I', size: 1, isInt: true, msaa: true }],
+    [PIXELFORMAT_R16I,     { name: 'R16I', size: 2, isInt: true, msaa: true }],
     [PIXELFORMAT_R32I,     { name: 'R32I', size: 4, isInt: true }],
-    [PIXELFORMAT_R32U,     { name: 'R32U', size: 4, isInt: true }],
-    [PIXELFORMAT_RG8I,     { name: 'RG8I', size: 2, isInt: true }],
-    [PIXELFORMAT_RG8U,     { name: 'RG8U', size: 2, isInt: true }],
-    [PIXELFORMAT_RG16I,    { name: 'RG16I', size: 4, isInt: true }],
-    [PIXELFORMAT_RG16U,    { name: 'RG16U', size: 4, isInt: true }],
+    [PIXELFORMAT_RG8I,     { name: 'RG8I', size: 2, isInt: true, msaa: true }],
+    [PIXELFORMAT_RG16I,    { name: 'RG16I', size: 4, isInt: true, msaa: true }],
     [PIXELFORMAT_RG32I,    { name: 'RG32I', size: 8, isInt: true }],
-    [PIXELFORMAT_RG32U,    { name: 'RG32U', size: 8, isInt: true }],
-    [PIXELFORMAT_RGBA8I,   { name: 'RGBA8I', size: 4, isInt: true }],
-    [PIXELFORMAT_RGBA8U,   { name: 'RGBA8U', size: 4, isInt: true }],
-    [PIXELFORMAT_RGBA16I,  { name: 'RGBA16I', size: 8, isInt: true }],
-    [PIXELFORMAT_RGBA16U,  { name: 'RGBA16U', size: 8, isInt: true }],
+    [PIXELFORMAT_RGBA8I,   { name: 'RGBA8I', size: 4, isInt: true, msaa: true }],
+    [PIXELFORMAT_RGBA16I,  { name: 'RGBA16I', size: 8, isInt: true, msaa: true }],
     [PIXELFORMAT_RGBA32I,  { name: 'RGBA32I', size: 16, isInt: true }],
-    [PIXELFORMAT_RGBA32U,  { name: 'RGBA32U', size: 16, isInt: true }]
+
+    // unsigned integer formats
+    [PIXELFORMAT_R8U,      { name: 'R8U', size: 1, isUint: true, msaa: true }],
+    [PIXELFORMAT_R16U,     { name: 'R16U', size: 2, isUint: true, msaa: true }],
+    [PIXELFORMAT_R32U,     { name: 'R32U', size: 4, isUint: true }],
+    [PIXELFORMAT_RG8U,     { name: 'RG8U', size: 2, isUint: true, msaa: true }],
+    [PIXELFORMAT_RG16U,    { name: 'RG16U', size: 4, isUint: true, msaa: true }],
+    [PIXELFORMAT_RG32U,    { name: 'RG32U', size: 8, isUint: true }],
+    [PIXELFORMAT_RGBA8U,   { name: 'RGBA8U', size: 4, isUint: true, msaa: true }],
+    [PIXELFORMAT_RGBA16U,  { name: 'RGBA16U', size: 8, isUint: true, msaa: true }],
+    [PIXELFORMAT_RGBA32U,  { name: 'RGBA32U', size: 16, isUint: true }]
 ]);
 
 // update this function when exposing additional compressed pixel formats
@@ -1015,7 +1188,80 @@ export const isSrgbPixelFormat = (format) => {
 };
 
 export const isIntegerPixelFormat = (format) => {
-    return pixelFormatInfo.get(format)?.isInt === true;
+    const info = pixelFormatInfo.get(format);
+    return info?.isInt === true || info?.isUint === true;
+};
+
+/**
+ * Returns true if the specified pixel format can be used to create a multisampled texture on
+ * WebGPU (per the WebGPU texture format capabilities table). Note that support for hardware
+ * resolve is a separate, narrower capability: integer formats and {@link PIXELFORMAT_R32F} are
+ * multisample-capable but cannot be resolved, and depth formats have no hardware resolve at all.
+ *
+ * {@link PIXELFORMAT_111110F} is reported as capable even though it is gated on the
+ * 'rg11b10ufloat-renderable' device feature - the feature is near-universally available, and on a
+ * device without it the WebGPU validation reports the failure. Snorm formats (RG8S, RGBA8S) become
+ * capable when the device reports supportsTextureFormatsTier1, which this static table does not yet
+ * reflect.
+ *
+ * @param {number} format - The pixel format.
+ * @returns {boolean} True if the format supports multisampling.
+ * @ignore
+ */
+export const isMultisampleCapablePixelFormat = (format) => {
+    return pixelFormatInfo.get(format)?.msaa === true;
+};
+
+/**
+ * Returns true if a multisampled texture of the specified pixel format can be hardware-resolved
+ * on WebGPU (per the WebGPU texture format capabilities table). This is a narrower capability
+ * than {@link isMultisampleCapablePixelFormat}: integer formats and {@link PIXELFORMAT_R32F} can
+ * be multisampled but not resolved (read their samples in a shader instead), and depth formats
+ * have no hardware resolve at all.
+ *
+ * @param {number} format - The pixel format.
+ * @returns {boolean} True if the format supports hardware resolve.
+ * @ignore
+ */
+export const isMultisampleResolveCapablePixelFormat = (format) => {
+    return pixelFormatInfo.get(format)?.msaaResolve === true;
+};
+
+// Cached shader type objects
+const GLSL_FLOAT = { sampler: 'sampler2D', returnType: 'vec4' };
+const GLSL_UINT = { sampler: 'usampler2D', returnType: 'uvec4' };
+const GLSL_INT = { sampler: 'isampler2D', returnType: 'ivec4' };
+
+const WGSL_FLOAT = { textureType: 'texture_2d<f32>', returnType: 'vec4f' };
+const WGSL_UINT = { textureType: 'texture_2d<u32>', returnType: 'vec4u' };
+const WGSL_INT = { textureType: 'texture_2d<i32>', returnType: 'vec4i' };
+
+/**
+ * Returns GLSL shader type info for the given pixel format.
+ *
+ * @param {number} format - The pixel format constant.
+ * @returns {{ sampler: string, returnType: string }} GLSL sampler and return type.
+ * @ignore
+ */
+export const getGlslShaderType = (format) => {
+    const info = pixelFormatInfo.get(format);
+    if (info?.isUint) return GLSL_UINT;
+    if (info?.isInt) return GLSL_INT;
+    return GLSL_FLOAT;
+};
+
+/**
+ * Returns WGSL shader type info for the given pixel format.
+ *
+ * @param {number} format - The pixel format constant.
+ * @returns {{ textureType: string, returnType: string }} WGSL texture type and return type.
+ * @ignore
+ */
+export const getWgslShaderType = (format) => {
+    const info = pixelFormatInfo.get(format);
+    if (info?.isUint) return WGSL_UINT;
+    if (info?.isInt) return WGSL_INT;
+    return WGSL_FLOAT;
 };
 
 /**
@@ -1066,6 +1312,7 @@ export const requiresManualGamma = (format) => {
 export const getPixelFormatArrayType = (format) => {
     switch (format) {
         case PIXELFORMAT_R32F:
+        case PIXELFORMAT_RG32F:
         case PIXELFORMAT_RGB32F:
         case PIXELFORMAT_RGBA32F:
             return Float32Array;
@@ -1076,12 +1323,14 @@ export const getPixelFormatArrayType = (format) => {
         case PIXELFORMAT_R32U:
         case PIXELFORMAT_RG32U:
         case PIXELFORMAT_RGBA32U:
+        case PIXELFORMAT_RGB9E5:
+        case PIXELFORMAT_RGB10A2:
+        case PIXELFORMAT_RGB10A2U:
             return Uint32Array;
         case PIXELFORMAT_R16I:
         case PIXELFORMAT_RG16I:
         case PIXELFORMAT_RGBA16I:
             return Int16Array;
-        case PIXELFORMAT_RG8:
         case PIXELFORMAT_R16U:
         case PIXELFORMAT_RG16U:
         case PIXELFORMAT_RGBA16U:
@@ -1096,6 +1345,8 @@ export const getPixelFormatArrayType = (format) => {
         case PIXELFORMAT_R8I:
         case PIXELFORMAT_RG8I:
         case PIXELFORMAT_RGBA8I:
+        case PIXELFORMAT_RG8S:
+        case PIXELFORMAT_RGBA8S:
             return Int8Array;
         default:
             return Uint8Array;
@@ -2025,11 +2276,30 @@ export const uniformTypeToStorage = new Uint8Array([
 export const DEVICETYPE_WEBGL2 = 'webgl2';
 
 /**
+ * A WebGL 2 device type with only the extensions available on 99%+ of devices exposed, and
+ * capabilities clamped to the values 99%+ of devices report. Useful for testing engine behavior
+ * on the most constrained WebGL 2 devices (e.g. no multi-draw, no float texture filtering, no
+ * compressed textures, 4k textures).
+ *
+ * @category Graphics
+ */
+export const DEVICETYPE_WEBGL2_BARE = 'webgl2:bare';
+
+/**
  * A WebGPU device type.
  *
  * @category Graphics
  */
 export const DEVICETYPE_WEBGPU = 'webgpu';
+
+/**
+ * A WebGPU device type with no optional features requested and default spec limits. Useful for
+ * testing engine behavior on the most constrained WebGPU devices (e.g. no compressed textures, no
+ * float32-filterable, no timestamp-query).
+ *
+ * @category Graphics
+ */
+export const DEVICETYPE_WEBGPU_BARE = 'webgpu:bare';
 
 /**
  * A Null device type.
@@ -2102,11 +2372,12 @@ export const TEXPROPERTY_ALL = 255; // 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128
 
 // indices of commonly used bind groups, sorted from the least commonly changing to avoid internal rebinding
 export const BINDGROUP_VIEW = 0;        // view bind group, textures, samplers and uniforms
-export const BINDGROUP_MESH = 1;        // mesh bind group - textures and samplers
-export const BINDGROUP_MESH_UB = 2;     // mesh bind group - a single uniform buffer
+export const BINDGROUP_MATERIAL = 1;    // material bind group - reserved for the material uniform buffer and textures, bound empty until materials own one
+export const BINDGROUP_MESH = 2;        // mesh bind group - textures and samplers
+export const BINDGROUP_MESH_UB = 3;     // mesh bind group - a single uniform buffer
 
 // names of bind groups
-export const bindGroupNames = ['view', 'mesh', 'mesh_ub'];
+export const bindGroupNames = ['view', 'material', 'mesh', 'mesh_ub'];
 
 // name of the default uniform buffer slot in a bind group
 export const UNIFORM_BUFFER_DEFAULT_SLOT_NAME = 'default';
@@ -2133,6 +2404,27 @@ export const typedArrayToType = {
 // map of engine INDEXFORMAT_*** to their corresponding typed array constructors and byte sizes
 export const typedArrayIndexFormats = [Uint8Array, Uint16Array, Uint32Array];
 export const typedArrayIndexFormatsByteSize = [1, 2, 4];
+
+// map of primitive GLSL types to their corresponding WGSL types
+export const primitiveGlslToWgslTypeMap = new Map([
+    // floating-point
+    ['float',  'f32'],
+    ['vec2',   'vec2f'],
+    ['vec3',   'vec3f'],
+    ['vec4',   'vec4f'],
+
+    // signed integer
+    ['int',    'i32'],
+    ['ivec2',  'vec2i'],
+    ['ivec3',  'vec3i'],
+    ['ivec4',  'vec4i'],
+
+    // unsigned integer
+    ['uint',   'u32'],
+    ['uvec2',  'vec2u'],
+    ['uvec3',  'vec3u'],
+    ['uvec4',  'vec4u']
+]);
 
 /**
  * Map of engine semantics into location on device in range 0..15 (note - semantics mapping to the
@@ -2176,24 +2468,3 @@ semanticToLocation[SEMANTIC_ATTR12] = 12;
 semanticToLocation[SEMANTIC_ATTR13] = 13;
 semanticToLocation[SEMANTIC_ATTR14] = 14;
 semanticToLocation[SEMANTIC_ATTR15] = 15;
-
-/**
- * Chunk API versions
- *
- * @category Graphics
- */
-export const CHUNKAPI_1_51 = '1.51';
-export const CHUNKAPI_1_55 = '1.55';
-export const CHUNKAPI_1_56 = '1.56';
-export const CHUNKAPI_1_57 = '1.57';
-export const CHUNKAPI_1_58 = '1.58';
-export const CHUNKAPI_1_60 = '1.60';
-export const CHUNKAPI_1_62 = '1.62';
-export const CHUNKAPI_1_65 = '1.65';
-export const CHUNKAPI_1_70 = '1.70';
-export const CHUNKAPI_2_1 = '2.1';
-export const CHUNKAPI_2_3 = '2.3';
-export const CHUNKAPI_2_5 = '2.5';
-export const CHUNKAPI_2_6 = '2.6';
-export const CHUNKAPI_2_7 = '2.7';
-export const CHUNKAPI_2_8 = '2.8';

@@ -13,7 +13,7 @@ const math = {
     DEG_TO_RAD: Math.PI / 180,
 
     /**
-     * Conversion factor between degrees and radians.
+     * Conversion factor between radians and degrees.
      *
      * @type {number}
      */
@@ -26,6 +26,10 @@ const math = {
      * @param {number} min - Min value.
      * @param {number} max - Max value.
      * @returns {number} The clamped value.
+     * @example
+     * math.clamp(5, 0, 10);  // returns 5
+     * math.clamp(-5, 0, 10); // returns 0
+     * math.clamp(15, 0, 10); // returns 10
      */
     clamp(value, min, max) {
         if (value >= max) return max;
@@ -34,13 +38,13 @@ const math = {
     },
 
     /**
-     * Convert an 24 bit integer into an array of 3 bytes.
+     * Convert a 24-bit integer into an array of 3 bytes.
      *
      * @param {number} i - Number holding an integer value.
      * @returns {number[]} An array of 3 bytes.
      * @example
      * // Set bytes to [0x11, 0x22, 0x33]
-     * const bytes = pc.math.intToBytes24(0x112233);
+     * const bytes = math.intToBytes24(0x112233);
      */
     intToBytes24(i) {
         const r = (i >> 16) & 0xff;
@@ -51,13 +55,13 @@ const math = {
     },
 
     /**
-     * Convert an 32 bit integer into an array of 4 bytes.
+     * Convert a 32-bit integer into an array of 4 bytes.
      *
      * @param {number} i - Number holding an integer value.
      * @returns {number[]} An array of 4 bytes.
      * @example
      * // Set bytes to [0x11, 0x22, 0x33, 0x44]
-     * const bytes = pc.math.intToBytes32(0x11223344);
+     * const bytes = math.intToBytes32(0x11223344);
      */
     intToBytes32(i) {
         const r = (i >> 24) & 0xff;
@@ -77,10 +81,10 @@ const math = {
      * @returns {number} A single unsigned 24 bit Number.
      * @example
      * // Set result1 to 0x112233 from an array of 3 values
-     * const result1 = pc.math.bytesToInt24([0x11, 0x22, 0x33]);
+     * const result1 = math.bytesToInt24([0x11, 0x22, 0x33]);
      *
      * // Set result2 to 0x112233 from 3 discrete values
-     * const result2 = pc.math.bytesToInt24(0x11, 0x22, 0x33);
+     * const result2 = math.bytesToInt24(0x11, 0x22, 0x33);
      */
     bytesToInt24(r, g, b) {
         if (r.length) {
@@ -101,10 +105,10 @@ const math = {
      * @returns {number} A single unsigned 32bit Number.
      * @example
      * // Set result1 to 0x11223344 from an array of 4 values
-     * const result1 = pc.math.bytesToInt32([0x11, 0x22, 0x33, 0x44]);
+     * const result1 = math.bytesToInt32([0x11, 0x22, 0x33, 0x44]);
      *
      * // Set result2 to 0x11223344 from 4 discrete values
-     * const result2 = pc.math.bytesToInt32(0x11, 0x22, 0x33, 0x44);
+     * const result2 = math.bytesToInt32(0x11, 0x22, 0x33, 0x44);
      */
     bytesToInt32(r, g, b, a) {
         if (r.length) {
@@ -126,13 +130,32 @@ const math = {
      *
      * @param {number} a - Number to linearly interpolate from.
      * @param {number} b - Number to linearly interpolate to.
-     * @param {number} alpha - The value controlling the result of interpolation. When alpha is 0,
-     * a is returned. When alpha is 1, b is returned. Between 0 and 1, a linear interpolation
-     * between a and b is returned. alpha is clamped between 0 and 1.
+     * @param {number} alpha - The interpolation factor, clamped to the range 0 to 1.
      * @returns {number} The linear interpolation of two numbers.
+     * @example
+     * math.lerp(0, 10, 0);   // returns 0
+     * math.lerp(0, 10, 0.5); // returns 5
+     * math.lerp(0, 10, 1);   // returns 10
      */
     lerp(a, b, alpha) {
         return a + (b - a) * math.clamp(alpha, 0, 1);
+    },
+
+    /**
+     * Calculates the unclamped linear interpolation of two numbers.
+     *
+     * @param {number} a - Number to linearly interpolate from.
+     * @param {number} b - Number to linearly interpolate to.
+     * @param {number} alpha - The interpolation factor. Values outside the range 0 to 1 extrapolate
+     * beyond a or b.
+     * @returns {number} The linear interpolation of two numbers.
+     * @example
+     * math.lerpUnclamped(0, 10, -0.5); // returns -5
+     * math.lerpUnclamped(0, 10, 0.5);  // returns 5
+     * math.lerpUnclamped(0, 10, 1.5);  // returns 15
+     */
+    lerpUnclamped(a, b, alpha) {
+        return a + (b - a) * alpha;
     },
 
     /**
@@ -145,6 +168,9 @@ const math = {
      * a is returned. When alpha is 1, b is returned. Between 0 and 1, a linear interpolation
      * between a and b is returned. alpha is clamped between 0 and 1.
      * @returns {number} The linear interpolation of two angles.
+     * @example
+     * math.lerpAngle(350, 10, 0.5); // returns 0 (shortest path crosses 360/0 boundary)
+     * math.lerpAngle(0, 90, 0.5);   // returns 45
      */
     lerpAngle(a, b, alpha) {
         if (b - a > 180) {
@@ -161,6 +187,9 @@ const math = {
      *
      * @param {number} x - Number to check for power-of-two property.
      * @returns {boolean} true if power-of-two and false otherwise.
+     * @example
+     * math.powerOfTwo(32); // returns true
+     * math.powerOfTwo(17); // returns false
      */
     powerOfTwo(x) {
         return ((x !== 0) && !(x & (x - 1)));
@@ -171,6 +200,9 @@ const math = {
      *
      * @param {number} val - The value for which to calculate the next power of 2.
      * @returns {number} The next power of 2.
+     * @example
+     * math.nextPowerOfTwo(17); // returns 32
+     * math.nextPowerOfTwo(32); // returns 32
      */
     nextPowerOfTwo(val) {
         val--;
@@ -188,9 +220,12 @@ const math = {
      *
      * @param {number} val - The value for which to calculate the nearest power of 2.
      * @returns {number} The nearest power of 2.
+     * @example
+     * math.nearestPowerOfTwo(17); // returns 16
+     * math.nearestPowerOfTwo(24); // returns 32
      */
     nearestPowerOfTwo(val) {
-        return Math.pow(2, Math.round(Math.log(val) / Math.log(2)));
+        return Math.pow(2, Math.round(Math.log2(val)));
     },
 
     /**
@@ -200,6 +235,8 @@ const math = {
      * @param {number} min - Lower bound for range.
      * @param {number} max - Upper bound for range.
      * @returns {number} Pseudo-random number between the supplied range.
+     * @example
+     * math.random(0, 10); // returns a random number between 0 and 10
      */
     random(min, max) {
         const diff = max - min;
@@ -220,6 +257,8 @@ const math = {
      * @param {number} max - The upper bound of the interpolation range.
      * @param {number} x - The value to interpolate.
      * @returns {number} The smoothly interpolated value clamped between zero and one.
+     * @example
+     * math.smoothstep(0, 10, 5); // returns 0.5
      */
     smoothstep(min, max, x) {
         if (x <= min) return 0;
@@ -240,6 +279,8 @@ const math = {
      * @param {number} max - The upper bound of the interpolation range.
      * @param {number} x - The value to interpolate.
      * @returns {number} The smoothly interpolated value clamped between zero and one.
+     * @example
+     * math.smootherstep(0, 10, 5); // returns 0.5
      */
     smootherstep(min, max, x) {
         if (x <= min) return 0;
@@ -256,6 +297,9 @@ const math = {
      * @param {number} numToRound - The number to round up.
      * @param {number} multiple - The multiple to round up to.
      * @returns {number} A number rounded up to nearest multiple.
+     * @example
+     * math.roundUp(17, 4); // returns 20
+     * math.roundUp(16, 4); // returns 16
      */
     roundUp(numToRound, multiple) {
         if (multiple === 0) {

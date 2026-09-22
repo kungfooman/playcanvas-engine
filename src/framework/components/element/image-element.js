@@ -68,6 +68,10 @@ class ImageRenderable {
         this._element.removeModelFromLayers(this.model);
         this.model.destroy();
         this.model = null;
+
+        // the node was added as a child of the entity, so detach it - otherwise it lingers in
+        // entity.children for the lifetime of the entity
+        this.node.remove();
         this.node = null;
         this.mesh = null;
         this.meshInstance?.destroy();
@@ -110,8 +114,8 @@ class ImageRenderable {
             this.model.meshInstances.push(this.unmaskMeshInstance);
 
             // copy parameters
-            for (const name in this.meshInstance.parameters) {
-                this.unmaskMeshInstance.setParameter(name, this.meshInstance.parameters[name].data);
+            for (const [name, parameter] of this.meshInstance.parameters) {
+                this.unmaskMeshInstance.setParameter(name, parameter.data);
             }
         } else {
             // remove unmask mesh instance from model
@@ -321,9 +325,11 @@ class ImageElement {
 
         // set default colors
         this._color = new Color(1, 1, 1, 1);
-        this._colorUniform = new Float32Array([1, 1, 1]);
+        this._colorUniform = new Float32Array([1, 1, 1, 1]);
+        // Custom materials can still consume the legacy vec3 emissive uniform.
+        this._emissiveUniform = this._colorUniform.subarray(0, 3);
         this._updateRenderableEmissive();
-        this._renderable.setParameter('material_opacity', 1);
+        this._updateRenderableOpacity();
 
         this._updateAabbFunc = this._updateAabb.bind(this);
 
@@ -337,6 +343,12 @@ class ImageElement {
         this._element.on('set:screen', this._onScreenChange, this);
         this._element.on('set:draworder', this._onDrawOrderChange, this);
         this._element.on('screen:set:resolution', this._onResolutionChange, this);
+
+        // If not being initialized (i.e., type changed after component was already enabled),
+        // we need to call onEnable to add the model to layers
+        if (!element._beingInitialized && element.enabled && element.entity.enabled) {
+            this.onEnable();
+        }
     }
 
     destroy() {
@@ -923,7 +935,20 @@ class ImageElement {
         this._colorUniform[0] = _tempColor.r;
         this._colorUniform[1] = _tempColor.g;
         this._colorUniform[2] = _tempColor.b;
-        this._renderable.setParameter('material_emissive', this._colorUniform);
+        if (this._material?.getDefine('MESH_COLOR') ?? true) {
+            this._renderable.setParameter('mesh_color', this._colorUniform);
+        } else {
+            this._renderable.setParameter('material_emissive', this._emissiveUniform);
+        }
+    }
+
+    _updateRenderableOpacity() {
+        this._colorUniform[3] = this._color.a;
+        if (this._material?.getDefine('MESH_COLOR') ?? true) {
+            this._renderable.setParameter('mesh_color', this._colorUniform);
+        } else {
+            this._renderable.setParameter('material_opacity', this._color.a);
+        }
     }
 
     set color(value) {
@@ -956,7 +981,7 @@ class ImageElement {
     set opacity(value) {
         if (value !== this._color.a) {
             this._color.a = value;
-            this._renderable.setParameter('material_opacity', value);
+            this._updateRenderableOpacity();
         }
 
         if (this._element) {
@@ -1048,16 +1073,28 @@ class ImageElement {
         }
 
         if (value) {
+            Debug.call(() => {
+                if (!value.transparent) {
+                    const composition = this._system.app.scene.layers;
+                    const hasOpaquePass = this._element.layers.some((id) => {
+                        const layer = composition.getLayerById(id);
+                        return layer && composition.getOpaqueIndex(layer) !== -1;
+                    });
+                    if (!hasOpaquePass) {
+                        Debug.warnOnce('Image element assigned an opaque material, but none of its layers has an opaque render pass. Enable material blending or assign the element to a layer with an opaque pass.', this._entity, value);
+                    }
+                }
+            });
+
             this._renderable.setMaterial(value);
 
-            // if this is not the default material then clear color and opacity overrides
-            if (this._hasUserMaterial()) {
-                this._renderable.deleteParameter('material_opacity');
-                this._renderable.deleteParameter('material_emissive');
-            } else {
-                // otherwise if we are back to the defaults reset the color and opacity
+            // Preserve custom material colors until the element setters are used again.
+            this._renderable.deleteParameter('material_opacity');
+            this._renderable.deleteParameter('material_emissive');
+            this._renderable.deleteParameter('mesh_color');
+            if (!this._hasUserMaterial() || value.getDefine('MESH_COLOR')) {
                 this._updateRenderableEmissive();
-                this._renderable.setParameter('material_opacity', this._color.a);
+                this._updateRenderableOpacity();
             }
         }
     }
@@ -1125,7 +1162,7 @@ class ImageElement {
             this._renderable.setParameter('texture_emissiveMap', this._texture);
             this._renderable.setParameter('texture_opacityMap', this._texture);
             this._updateRenderableEmissive();
-            this._renderable.setParameter('material_opacity', this._color.a);
+            this._updateRenderableOpacity();
 
             // if texture's aspect ratio changed and the element needs to preserve aspect ratio, refresh the mesh
             const newAspectRatio = this._texture.width / this._texture.height;

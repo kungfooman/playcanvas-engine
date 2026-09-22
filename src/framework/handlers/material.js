@@ -1,10 +1,9 @@
 import { Debug } from '../../core/debug.js';
-import { http } from '../../platform/net/http.js';
 import { standardMaterialCubemapParameters, standardMaterialTextureParameters } from '../../scene/materials/standard-material-parameters.js';
+import { StandardMaterial } from '../../scene/materials/standard-material.js';
 import { AssetReference } from '../asset/asset-reference.js';
 import { JsonStandardMaterialParser } from '../parsers/material/json-standard-material.js';
 import { ResourceHandler } from './handler.js';
-import { getBuiltInTexture } from '../../platform/graphics/built-in-textures.js';
 
 /**
  * @import { AppBase } from '../app-base.js'
@@ -35,13 +34,16 @@ const PLACEHOLDER_MAP = {
     thicknessMap: 'black',
     iridescenceMap: 'black',
     iridescenceThicknessMap: 'black',
-    envAtlas: 'black'
+    envAtlas: 'black',
+    anisotropyMap: 'black'
 };
 
 /**
- * Resource handler used for loading {@link Material} resources.
+ * Resource handler for the `material` asset type. Loads material JSON into a
+ * {@link StandardMaterial} and binds the texture assets it references. A custom parser may
+ * produce another kind of {@link Material}.
  *
- * @category Graphics
+ * @category Asset
  */
 class MaterialHandler extends ResourceHandler {
     /**
@@ -55,48 +57,21 @@ class MaterialHandler extends ResourceHandler {
 
         this._assets = app.assets;
         this._device = app.graphicsDevice;
+
+        // the json parser is the catch-all for material assets; the handler keeps a reference to
+        // it as patch uses its migrate/initialize when binding standard material assets
         this._parser = new JsonStandardMaterialParser();
-    }
-
-    load(url, callback) {
-        if (typeof url === 'string') {
-            url = {
-                load: url,
-                original: url
-            };
-        }
-
-        // Loading from URL (engine-only)
-        http.get(url.load, {
-            retry: this.maxRetries > 0,
-            maxRetries: this.maxRetries
-        }, (err, response) => {
-            if (!err) {
-                if (callback) {
-                    response._engine = true;
-                    callback(null, response);
-                }
-            } else {
-                if (callback) {
-                    callback(`Error loading material: ${url.original} [${err}]`);
-                }
-            }
-        });
-    }
-
-    open(url, data) {
-        const material = this._parser.parse(data);
-
-        // temp storage for engine-only as we need this during patching
-        if (data._engine) {
-            material._data = data;
-            delete data._engine;
-        }
-
-        return material;
+        this.addParser(this._parser);
     }
 
     patch(asset, assets) {
+        // patching (the engine-only _data handoff, the name sync and the asset binding below) is
+        // specific to StandardMaterial, the built-in json parser's output; materials produced by
+        // user-registered parsers manage their own data and asset references
+        if (!(asset.resource instanceof StandardMaterial)) {
+            return;
+        }
+
         // in an engine-only environment we manually copy the source data into the asset
         if (asset.resource._data) {
             asset._data = asset.resource._data; // use _data to avoid firing events
@@ -129,7 +104,7 @@ class MaterialHandler extends ResourceHandler {
     _getPlaceholderTexture(parameterName) {
         const placeholder = PLACEHOLDER_MAP[parameterName];
         Debug.assert(placeholder, `No placeholder texture found for parameter: ${parameterName}`);
-        return getBuiltInTexture(this._device, placeholder);
+        return this._device.builtInTextures[placeholder];
     }
 
     // assign a placeholder texture while waiting for one to load

@@ -7,14 +7,11 @@ import { path } from '../core/path.js';
 import { TRACEID_RENDER_FRAME, TRACEID_RENDER_FRAME_TIME } from '../core/constants.js';
 import { Debug } from '../core/debug.js';
 import { EventHandler } from '../core/event-handler.js';
-import { Color } from '../core/math/color.js';
-import { Mat4 } from '../core/math/mat4.js';
 import { math } from '../core/math/math.js';
-import { Quat } from '../core/math/quat.js';
-import { Vec3 } from '../core/math/vec3.js';
 
 import {
-    PRIMITIVE_TRIANGLES, PRIMITIVE_TRIFAN, PRIMITIVE_TRISTRIP, CULLFACE_NONE
+    SHADERLANGUAGE_GLSL,
+    SHADERLANGUAGE_WGSL
 } from '../platform/graphics/constants.js';
 import { DebugGraphics } from '../platform/graphics/debug-graphics.js';
 import { http } from '../platform/net/http.js';
@@ -31,7 +28,6 @@ import { AreaLightLuts } from '../scene/area-light-luts.js';
 import { Layer } from '../scene/layer.js';
 import { LayerComposition } from '../scene/composition/layer-composition.js';
 import { Scene } from '../scene/scene.js';
-import { ShaderMaterial } from '../scene/materials/shader-material.js';
 import { StandardMaterial } from '../scene/materials/standard-material.js';
 import { setDefaultMaterial } from '../scene/materials/default-material.js';
 
@@ -50,24 +46,25 @@ import { ScriptRegistry } from './script/script-registry.js';
 import { Entity } from './entity.js';
 import { SceneRegistry } from './scene-registry.js';
 import { script } from './script.js';
-import { ApplicationStats } from './stats.js';
+import { AppStats } from './app-stats.js';
 import { getApplication, setApplication } from './globals.js';
+import { shaderChunksGLSL } from '../scene/shader-lib/glsl/collections/shader-chunks-glsl.js';
+import { shaderChunksWGSL } from '../scene/shader-lib/wgsl/collections/shader-chunks-wgsl.js';
+import { ShaderChunks } from '../scene/shader-lib/shader-chunks.js';
 
 /**
  * @import { AppOptions } from './app-options.js'
  * @import { BatchManager } from '../scene/batching/batch-manager.js'
+ * @import { Color } from '../core/math/color.js'
  * @import { ElementInput } from './input/element-input.js'
  * @import { GamePads } from '../platform/input/game-pads.js'
  * @import { GraphicsDevice } from '../platform/graphics/graphics-device.js'
  * @import { Keyboard } from '../platform/input/keyboard.js'
  * @import { Lightmapper } from './lightmapper/lightmapper.js'
- * @import { Material } from '../scene/materials/material.js'
- * @import { MeshInstance } from '../scene/mesh-instance.js'
- * @import { Mesh } from '../scene/mesh.js'
  * @import { Mouse } from '../platform/input/mouse.js'
  * @import { SoundManager } from '../platform/sound/manager.js'
- * @import { Texture } from '../platform/graphics/texture.js'
  * @import { TouchDevice } from '../platform/input/touch-device.js'
+ * @import { Vec3 } from '../core/math/vec3.js'
  * @import { XrManager } from './xr/xr-manager.js'
  */
 
@@ -82,15 +79,6 @@ import { getApplication, setApplication } from './globals.js';
 /**
  * @callback PreloadAppCallback
  * Callback used by {@link AppBase#preload} when all assets (marked as 'preload') are loaded.
- * @returns {void}
- */
-
-/**
- * @callback MakeTickCallback
- * Callback used by {@link AppBase#start} and itself to request the rendering of a new animation
- * frame.
- * @param {number} [timestamp] - The timestamp supplied by requestAnimationFrame.
- * @param {XRFrame} [frame] - XRFrame from requestAnimationFrame callback.
  * @returns {void}
  */
 
@@ -118,6 +106,16 @@ let app = null;
  * {@link ResourceHandler}s yourself. This facilitates
  * [tree-shaking](https://developer.mozilla.org/en-US/docs/Glossary/Tree_shaking) when bundling
  * your application.
+ *
+ * It is the preferred entry point for new code - {@link Application} is a convenience subclass
+ * that registers everything for you, and is expected to be deprecated in a future release.
+ *
+ * `new AppBase(canvas)` only constructs the instance and its root entity. You must then call
+ * {@link AppBase#init} with an {@link AppOptions} supplying at minimum `graphicsDevice`,
+ * `componentSystems` and `resourceHandlers` before adding components or calling
+ * {@link AppBase#start}. Create the `graphicsDevice` with {@link createGraphicsDevice}.
+ *
+ * @category Framework
  */
 class AppBase extends EventHandler {
     /**
@@ -169,16 +167,10 @@ class AppBase extends EventHandler {
      */
     _entityIndex = {};
 
-    /**
-     * @type {boolean}
-     * @ignore
-     */
+    /** @ignore */
     _inTools = false;
 
-    /**
-     * @type {string}
-     * @ignore
-     */
+    /** @ignore */
     _scriptPrefix = '';
 
     /** @ignore */
@@ -188,7 +180,6 @@ class AppBase extends EventHandler {
      * Set this to false if you want to run without using bundles. We set it to true only if
      * TextDecoder is available because we currently rely on it for untarring.
      *
-     * @type {boolean}
      * @ignore
      */
     enableBundles = (typeof TextDecoder !== 'undefined');
@@ -201,9 +192,97 @@ class AppBase extends EventHandler {
     frameRequestId;
 
     /**
-     * Scales the global time delta. Defaults to 1.
+     * Main loop tick, invoked by `requestAnimationFrame` each frame. Bound to this instance so
+     * it can be passed directly to `requestAnimationFrame`. Subclasses may replace this with
+     * their own tick function.
      *
-     * @type {number}
+     * @param {number} [timestamp] - The timestamp supplied by requestAnimationFrame.
+     * @param {XRFrame} [xrFrame] - XRFrame from requestAnimationFrame callback.
+     * @ignore
+     */
+    tick = (timestamp, xrFrame) => {
+        if (!this.graphicsDevice) {
+            return;
+        }
+
+        // cancel any hanging rAF to avoid multiple rAF callbacks per frame
+        if (this.frameRequestId) {
+            this.xr?.session?.cancelAnimationFrame(this.frameRequestId);
+            cancelAnimationFrame(this.frameRequestId);
+            this.frameRequestId = null;
+        }
+
+        this._inFrameUpdate = true;
+
+        setApplication(this);
+
+        // have current application pointer in pc
+        app = this;
+
+        const currentTime = this._processTimestamp(timestamp) || now();
+        const ms = currentTime - (this._time || currentTime);
+        let dt = ms / 1000.0;
+        dt = math.clamp(dt, 0, this.maxDeltaTime);
+        dt *= this.timeScale;
+
+        this._time = currentTime;
+
+        // Submit a request to queue up a new animation frame immediately
+        this.requestAnimationFrame();
+
+        if (this.graphicsDevice.contextLost) {
+            return;
+        }
+
+        this.stats.updateBasic(currentTime, dt, ms, this.renderer, this.graphicsDevice);
+
+        // #if _PROFILER
+        this.stats.updateDetailed(this.renderer, this.graphicsDevice);
+        // #endif
+
+        this.fire('frameupdate', ms);
+
+        let skipUpdate = false;
+
+        if (xrFrame) {
+            skipUpdate = !this.xr?.update(xrFrame);
+        }
+
+        if (!skipUpdate) {
+
+            Debug.trace(TRACEID_RENDER_FRAME, `---- Frame ${this.frame}`);
+            Debug.trace(TRACEID_RENDER_FRAME_TIME, `-- UpdateStart ${now().toFixed(2)}ms`);
+
+            this.update(dt);
+
+            this.fire('framerender');
+
+            if (this.autoRender || this.renderNextFrame) {
+
+                Debug.trace(TRACEID_RENDER_FRAME_TIME, `-- RenderStart ${now().toFixed(2)}ms`);
+
+                this.render();
+                this.renderNextFrame = false;
+
+                Debug.trace(TRACEID_RENDER_FRAME_TIME, `-- RenderEnd ${now().toFixed(2)}ms`);
+            }
+
+            this.fire('frameend');
+            this.stats.frameEnd();
+        }
+
+        this._inFrameUpdate = false;
+
+        if (this._destroyRequested) {
+            this.destroy();
+        }
+    };
+
+    /**
+     * Scales the global time delta. Defaults to 1. Scripts, animation and physics all receive
+     * the scaled delta, so 0 stops them together. To pause or slow down physics alone while the
+     * rest of the application keeps running, use {@link RigidBodyComponentSystem#timeScale}.
+     *
      * @example
      * // Set the app to run at half speed
      * this.app.timeScale = 0.5;
@@ -225,7 +304,6 @@ class AppBase extends EventHandler {
     /**
      * The total number of frames the application has updated since start() was called.
      *
-     * @type {number}
      * @ignore
      */
     frame = 0;
@@ -254,19 +332,16 @@ class AppBase extends EventHandler {
     scriptsOrder = [];
 
     /**
-     * The application's performance stats.
-     *
-     * @type {ApplicationStats}
-     * @ignore
+     * @type {AppStats}
+     * @private
      */
-    stats;
+    _stats;
 
     /**
      * When true, the application's render function is called every frame. Setting autoRender to
      * false is useful to applications where the rendered image may often be unchanged over time.
      * This can heavily reduce the application's load on the CPU and GPU. Defaults to true.
      *
-     * @type {boolean}
      * @example
      * // Disable rendering every frame and only render on a keydown event
      * this.app.autoRender = false;
@@ -281,10 +356,9 @@ class AppBase extends EventHandler {
      * effect if {@link autoRender} is set to false. The value of renderNextFrame is set back to
      * false again as soon as the scene has been rendered.
      *
-     * @type {boolean}
      * @example
      * // Render the scene only while space key is pressed
-     * if (this.app.keyboard.isPressed(pc.KEY_SPACE)) {
+     * if (this.app.keyboard.isPressed(KEY_SPACE)) {
      *     this.app.renderNextFrame = true;
      * }
      */
@@ -313,7 +387,7 @@ class AppBase extends EventHandler {
      * @type {Scene}
      * @example
      * // Set the fog type property of the application's scene
-     * this.app.scene.fog.type = pc.FOG_LINEAR;
+     * this.app.scene.fog.type = FOG_LINEAR;
      */
     scene;
 
@@ -339,7 +413,7 @@ class AppBase extends EventHandler {
      * // Search the asset registry for all assets with the tag 'vehicle'
      * const vehicleAssets = this.app.assets.findByTag('vehicle');
      */
-    assets;
+    assets = new AssetRegistry(this.loader);
 
     /**
      * The bundle registry managed by the application.
@@ -430,7 +504,7 @@ class AppBase extends EventHandler {
      * @type {XrManager|null}
      * @example
      * // check if VR is available
-     * if (app.xr.isAvailable(pc.XRTYPE_VR)) {
+     * if (app.xr.isAvailable(XRTYPE_VR)) {
      *     // VR is available
      * }
      */
@@ -441,7 +515,7 @@ class AppBase extends EventHandler {
      *
      * @param {HTMLCanvasElement | OffscreenCanvas} canvas - The canvas element.
      * @example
-     * const app = new pc.AppBase(canvas);
+     * const app = new AppBase(canvas);
      *
      * const options = new AppOptions();
      * app.init(options);
@@ -476,21 +550,25 @@ class AppBase extends EventHandler {
     init(appOptions) {
         const {
             assetPrefix, batchManager, componentSystems, elementInput, gamepads, graphicsDevice, keyboard,
-            lightmapper, mouse, resourceHandlers, scriptsOrder, scriptPrefix, soundManager, touch, xr
+            lightmapper, mouse, physicsWorld, resourceHandlers, scriptsOrder, scriptPrefix, soundManager,
+            touch, xr
         } = appOptions;
 
         Debug.assert(graphicsDevice, 'The application cannot be created without a valid GraphicsDevice');
-
         this.graphicsDevice = graphicsDevice;
+
+        // register shader chunks
+        ShaderChunks.get(graphicsDevice, SHADERLANGUAGE_GLSL).add(shaderChunksGLSL);
+        ShaderChunks.get(graphicsDevice, SHADERLANGUAGE_WGSL).add(shaderChunksWGSL);
+
         this._initDefaultMaterial();
         this._initProgramLibrary();
-        this.stats = new ApplicationStats(graphicsDevice);
+        this._stats = new AppStats(this);
 
         this._soundManager = soundManager;
         this.scene = new Scene(graphicsDevice);
         this._registerSceneImmediate(this.scene);
 
-        this.assets = new AssetRegistry(this.loader);
         if (assetPrefix) this.assets.prefix = assetPrefix;
 
         this.bundles = new BundleRegistry(this.assets);
@@ -515,8 +593,7 @@ class AppBase extends EventHandler {
         // Placeholder texture for area light LUTs
         AreaLightLuts.createPlaceholder(graphicsDevice);
 
-        this.renderer = new ForwardRenderer(graphicsDevice);
-        this.renderer.scene = this.scene;
+        this.renderer = new ForwardRenderer(graphicsDevice, this.scene);
 
         if (lightmapper) {
             this.lightmapper = new lightmapper(graphicsDevice, this.root, this.scene, this.renderer, this.assets);
@@ -552,34 +629,27 @@ class AppBase extends EventHandler {
             this.loader.addHandler(handler.handlerType, handler);
         });
 
+        // default to retrying failed asset loads to make apps more resilient to transient network
+        // errors
+        this.loader.enableRetry();
+
         // Create and register all required component systems
         componentSystems.forEach((componentSystem) => {
             this.systems.add(new componentSystem(this));
         });
 
-        this._visibilityChangeHandler = this.onVisibilityChange.bind(this);
-
-        // Depending on browser add the correct visibilitychange event and store the name of the
-        // hidden attribute in this._hiddenAttr.
-        if (typeof document !== 'undefined') {
-            if (document.hidden !== undefined) {
-                this._hiddenAttr = 'hidden';
-                document.addEventListener('visibilitychange', this._visibilityChangeHandler, false);
-            } else if (document.mozHidden !== undefined) {
-                this._hiddenAttr = 'mozHidden';
-                document.addEventListener('mozvisibilitychange', this._visibilityChangeHandler, false);
-            } else if (document.msHidden !== undefined) {
-                this._hiddenAttr = 'msHidden';
-                document.addEventListener('msvisibilitychange', this._visibilityChangeHandler, false);
-            } else if (document.webkitHidden !== undefined) {
-                this._hiddenAttr = 'webkitHidden';
-                document.addEventListener('webkitvisibilitychange', this._visibilityChangeHandler, false);
-            }
+        // Install a user-supplied physics backend. When omitted, the rigid body system
+        // auto-detects Ammo once application libraries have loaded (see onLibrariesLoaded).
+        if (physicsWorld) {
+            Debug.assert(this.systems.rigidbody, 'AppOptions.physicsWorld requires RigidBodyComponentSystem to be included in AppOptions.componentSystems.');
+            this.systems.rigidbody?.setPhysicsWorld(physicsWorld);
         }
 
-        // bind tick function to current scope
-        /* eslint-disable-next-line no-use-before-define */
-        this.tick = makeTick(this); // Circular linting issue as makeTick and Application reference each other
+        this._visibilityChangeHandler = this.onVisibilityChange.bind(this);
+
+        if (typeof document !== 'undefined') {
+            document.addEventListener('visibilitychange', this._visibilityChangeHandler, false);
+        }
     }
 
     static _applications = {};
@@ -594,7 +664,7 @@ class AppBase extends EventHandler {
      * this id. Otherwise current application will be returned.
      * @returns {AppBase|undefined} The running application, if any.
      * @example
-     * const app = pc.AppBase.getApplication();
+     * const app = AppBase.getApplication();
      */
     static getApplication(id) {
         return id ? AppBase._applications[id] : getApplication();
@@ -609,7 +679,7 @@ class AppBase extends EventHandler {
 
     /** @private */
     _initProgramLibrary() {
-        const library = new ProgramLibrary(this.graphicsDevice, new StandardMaterial());
+        const library = new ProgramLibrary(this.graphicsDevice);
         setProgramLibrary(this.graphicsDevice, library);
     }
 
@@ -644,6 +714,17 @@ class AppBase extends EventHandler {
      */
     get fillMode() {
         return this._fillMode;
+    }
+
+    /**
+     * The application's performance statistics. Returns the same {@link AppStats} instance on
+     * every access. Engine measurements are read-only; {@link AppStats#user} holds writable
+     * application-defined counters. See {@link AppStats} for units, sampling and GPU profiling setup.
+     *
+     * @type {AppStats}
+     */
+    get stats() {
+        return this._stats;
     }
 
     /**
@@ -693,6 +774,11 @@ class AppBase extends EventHandler {
     /**
      * Load all assets in the asset registry that are marked as 'preload'.
      *
+     * Container-backed render assets wait for their referenced containers to be registered and
+     * loaded. If a preloaded render asset's `data.containerAsset` refers to a container that is
+     * never registered, this method never calls its callback or fires `preload:end`. Debug builds
+     * warn when a render asset starts waiting for an unregistered container.
+     *
      * @param {PreloadAppCallback} callback - Function called when all assets are loaded.
      */
     preload(callback) {
@@ -739,9 +825,19 @@ class AppBase extends EventHandler {
 
     // set application properties from data file
     _parseApplicationProperties(props, callback) {
-        // configure retrying assets
+        // configure retrying assets - overrides the default set in the constructor
         if (typeof props.maxAssetRetries === 'number' && props.maxAssetRetries > 0) {
             this.loader.enableRetry(props.maxAssetRetries);
+        }
+
+        // configure the concurrent request limit - overrides the default (0 is valid, meaning unlimited)
+        if (typeof props.maxConcurrentRequests === 'number' && props.maxConcurrentRequests >= 0) {
+            this.loader.maxConcurrentRequests = props.maxConcurrentRequests;
+        }
+
+        // send asset requests with credentials - applied before preloading so preloaded assets pick it up
+        if (typeof props.withCredentials === 'boolean') {
+            this.loader.withCredentials = props.withCredentials;
         }
 
         // TODO: remove this temporary block after migrating properties
@@ -969,7 +1065,20 @@ class AppBase extends EventHandler {
         this.systems.fire('postPostInitialize', this.root);
         this.fire('postinitialize');
 
-        this.tick();
+        this.requestAnimationFrame();
+    }
+
+    /**
+     * Request the next animation frame tick.
+     *
+     * @ignore
+     */
+    requestAnimationFrame() {
+        if (this.xr?.session) {
+            this.frameRequestId = this.xr.session.requestAnimationFrame(this.tick);
+        } else {
+            this.frameRequestId = platform.browser || platform.worker ? requestAnimationFrame(this.tick) : null;
+        }
     }
 
     /**
@@ -979,9 +1088,6 @@ class AppBase extends EventHandler {
      * @private
      */
     inputUpdate(dt) {
-        if (this.controller) {
-            this.controller.update(dt);
-        }
         if (this.mouse) {
             this.mouse.update();
         }
@@ -1004,15 +1110,28 @@ class AppBase extends EventHandler {
     update(dt) {
         this.frame++;
 
-        this.graphicsDevice.updateClientRect();
+        Debug.call(() => {
+            this.assets.log();
+        });
 
-        // #if _PROFILER
+        this.graphicsDevice.update();
+
         this.stats.frame.updateStart = now();
-        // #endif
 
+        // script update
+        this.stats.frame.scriptUpdateStart = now();
         this.systems.fire(this._inTools ? 'toolsUpdate' : 'update', dt);
+        this.stats.frame.scriptUpdate = now() - this.stats.frame.scriptUpdateStart;
+
+        // animation update
+        this.stats.frame.animUpdateStart = now();
         this.systems.fire('animationUpdate', dt);
+        this.stats.frame.animUpdate = now() - this.stats.frame.animUpdateStart;
+
+        // post update
+        this.stats.frame.scriptPostUpdateStart = now();
         this.systems.fire('postUpdate', dt);
+        this.stats.frame.scriptPostUpdate = now() - this.stats.frame.scriptPostUpdateStart;
 
         // fire update event
         this.fire('update', dt);
@@ -1020,17 +1139,7 @@ class AppBase extends EventHandler {
         // update input devices
         this.inputUpdate(dt);
 
-        // #if _PROFILER
         this.stats.frame.updateTime = now() - this.stats.frame.updateStart;
-        // #endif
-    }
-
-    frameStart() {
-        this.graphicsDevice.frameStart();
-    }
-
-    frameEnd() {
-        this.graphicsDevice.frameEnd();
     }
 
     /**
@@ -1041,9 +1150,11 @@ class AppBase extends EventHandler {
      * @ignore
      */
     render() {
-        // #if _PROFILER
+        this.updateCanvasSize();
+
+        this.graphicsDevice.frameStart();
+
         this.stats.frame.renderStart = now();
-        // #endif
 
         this.fire('prerender');
         this.root.syncHierarchy();
@@ -1061,120 +1172,32 @@ class AppBase extends EventHandler {
 
         this.fire('postrender');
 
-        // #if _PROFILER
         this.stats.frame.renderTime = now() - this.stats.frame.renderStart;
-        // #endif
+
+        this.graphicsDevice.frameEnd();
     }
 
     // render a layer composition
     renderComposition(layerComposition) {
         DebugGraphics.clearGpuMarkers();
 
-        // update composition, cull everything, assign atlas slots for clustered lighting
+        // update composition + light visibility, assign atlas slots for clustered lighting
         this.renderer.update(layerComposition);
 
+        // build the frame graph from the (not-yet-culled) composition
         this.renderer.buildFrameGraph(this.frameGraph, layerComposition);
+
+        // cull mesh instances and shadow casters - this fills what the passes read at render time
+        this.renderer.cull(layerComposition);
+
         this.frameGraph.render(this.graphicsDevice);
     }
 
     /**
-     * @param {number} now - The timestamp passed to the requestAnimationFrame callback.
-     * @param {number} dt - The time delta in seconds since the last frame. This is subject to the
-     * application's time scale and max delta values.
-     * @param {number} ms - The time in milliseconds since the last frame.
-     * @private
-     */
-    _fillFrameStatsBasic(now, dt, ms) {
-        // Timing stats
-        const stats = this.stats.frame;
-        stats.dt = dt;
-        stats.ms = ms;
-        if (now > stats._timeToCountFrames) {
-            stats.fps = stats._fpsAccum;
-            stats._fpsAccum = 0;
-            stats._timeToCountFrames = now + 1000;
-        } else {
-            stats._fpsAccum++;
-        }
-
-        // total draw call
-        this.stats.drawCalls.total = this.graphicsDevice._drawCallsPerFrame;
-        this.graphicsDevice._drawCallsPerFrame = 0;
-    }
-
-    /** @private */
-    _fillFrameStats() {
-        let stats = this.stats.frame;
-
-        // Render stats
-        stats.cameras = this.renderer._camerasRendered;
-        stats.materials = this.renderer._materialSwitches;
-        stats.shaders = this.graphicsDevice._shaderSwitchesPerFrame;
-        stats.shadowMapUpdates = this.renderer._shadowMapUpdates;
-        stats.shadowMapTime = this.renderer._shadowMapTime;
-        stats.depthMapTime = this.renderer._depthMapTime;
-        stats.forwardTime = this.renderer._forwardTime;
-        const prims = this.graphicsDevice._primsPerFrame;
-        stats.triangles = prims[PRIMITIVE_TRIANGLES] / 3 +
-            Math.max(prims[PRIMITIVE_TRISTRIP] - 2, 0) +
-            Math.max(prims[PRIMITIVE_TRIFAN] - 2, 0);
-        stats.cullTime = this.renderer._cullTime;
-        stats.sortTime = this.renderer._sortTime;
-        stats.skinTime = this.renderer._skinTime;
-        stats.morphTime = this.renderer._morphTime;
-        stats.lightClusters = this.renderer._lightClusters;
-        stats.lightClustersTime = this.renderer._lightClustersTime;
-        stats.otherPrimitives = 0;
-        for (let i = 0; i < prims.length; i++) {
-            if (i < PRIMITIVE_TRIANGLES) {
-                stats.otherPrimitives += prims[i];
-            }
-            prims[i] = 0;
-        }
-        this.renderer._camerasRendered = 0;
-        this.renderer._materialSwitches = 0;
-        this.renderer._shadowMapUpdates = 0;
-        this.graphicsDevice._shaderSwitchesPerFrame = 0;
-        this.renderer._cullTime = 0;
-        this.renderer._layerCompositionUpdateTime = 0;
-        this.renderer._lightClustersTime = 0;
-        this.renderer._sortTime = 0;
-        this.renderer._skinTime = 0;
-        this.renderer._morphTime = 0;
-        this.renderer._shadowMapTime = 0;
-        this.renderer._depthMapTime = 0;
-        this.renderer._forwardTime = 0;
-
-        // Draw call stats
-        stats = this.stats.drawCalls;
-        stats.forward = this.renderer._forwardDrawCalls;
-        stats.culled = this.renderer._numDrawCallsCulled;
-        stats.depth = 0;
-        stats.shadow = this.renderer._shadowDrawCalls;
-        stats.skinned = this.renderer._skinDrawCalls;
-        stats.immediate = 0;
-        stats.instanced = 0;
-        stats.removedByInstancing = 0;
-        stats.misc = stats.total - (stats.forward + stats.shadow);
-        this.renderer._depthDrawCalls = 0;
-        this.renderer._shadowDrawCalls = 0;
-        this.renderer._forwardDrawCalls = 0;
-        this.renderer._numDrawCallsCulled = 0;
-        this.renderer._skinDrawCalls = 0;
-        this.renderer._immediateRendered = 0;
-        this.renderer._instancedDrawCalls = 0;
-
-        this.stats.misc.renderTargetCreationTime = this.graphicsDevice.renderTargetCreationTime;
-
-        stats = this.stats.particles;
-        stats.updatesPerFrame = stats._updatesPerFrame;
-        stats.frameTime = stats._frameTime;
-        stats._updatesPerFrame = 0;
-        stats._frameTime = 0;
-    }
-
-    /**
-     * Controls how the canvas fills the window and resizes when the window changes.
+     * Controls how the canvas fills the window. The canvas is sized when this is called and on
+     * every {@link AppBase#resizeCanvas}; the engine installs no window `resize` listener of its
+     * own, so call `resizeCanvas` from your own handler to keep the window-relative modes tracking
+     * the window.
      *
      * @param {string} mode - The mode to use when setting the size of the canvas. Can be:
      *
@@ -1223,7 +1246,7 @@ class AppBase extends EventHandler {
      * @returns {boolean} True if the application is not visible and false otherwise.
      */
     isHidden() {
-        return document[this._hiddenAttr];
+        return document.hidden;
     }
 
     /**
@@ -1254,7 +1277,9 @@ class AppBase extends EventHandler {
      *
      * @param {number} [width] - The width of the canvas. Only used if current fill mode is {@link FILLMODE_NONE}.
      * @param {number} [height] - The height of the canvas. Only used if current fill mode is {@link FILLMODE_NONE}.
-     * @returns {object} A object containing the values calculated to use as width and height.
+     * @returns {{width: number, height: number}|undefined} An object containing the values
+     * calculated to use as width and height, or `undefined` if resizing is not allowed or an XR
+     * session is active.
      */
     resizeCanvas(width, height) {
         if (!this._allowResize) return undefined; // prevent resizing (e.g. if presenting in VR HMD)
@@ -1378,11 +1403,18 @@ class AppBase extends EventHandler {
      * of the scene.
      * @param {number|null} [settings.render.skybox] - The asset ID of the cube map texture to be
      * used as the scene's skybox. Defaults to null.
-     * @param {number} settings.render.skyboxIntensity - Multiplier for skybox intensity.
-     * @param {number} settings.render.skyboxLuminance - Lux (lm/m^2) value for skybox intensity when physical light units are enabled.
-     * @param {number} settings.render.skyboxMip - The mip level of the skybox to be displayed.
+     * @param {number} [settings.render.skyboxIntensity] - Multiplier for skybox intensity. Defaults to 1.
+     * @param {number} [settings.render.skyboxLuminance] - Lux (lm/m^2) value for skybox intensity when physical light units are enabled. Defaults to 20000.
+     * @param {number} [settings.render.skyboxMip] - The mip level of the skybox to be displayed. Defaults to 0.
      * Only valid for prefiltered cubemap skyboxes.
-     * @param {number[]} settings.render.skyboxRotation - Rotation of skybox.
+     * @param {number[]} [settings.render.skyboxRotation] - Rotation of skybox. Defaults to [0, 0, 0].
+     *
+     * @param {string} [settings.render.skyType] - The type of the sky. One of the SKYTYPE_* constants. Defaults to {@link SKYTYPE_INFINITE}.
+     * @param {number[]} [settings.render.skyMeshPosition] - The position of sky mesh. Ignored for {@link SKYTYPE_INFINITE}. Defaults to [0, 0, 0].
+     * @param {number[]} [settings.render.skyMeshRotation] - The rotation of sky mesh. Ignored for {@link SKYTYPE_INFINITE}. Defaults to [0, 0, 0].
+     * @param {number[]} [settings.render.skyMeshScale] - The scale of sky mesh. Ignored for {@link SKYTYPE_INFINITE}. Defaults to [1, 1, 1].
+     * @param {number[]} [settings.render.skyCenter] - The center of the sky. Ignored for {@link SKYTYPE_INFINITE}. Defaults to [0, 1, 0].
+     *
      * @param {number} settings.render.lightmapSizeMultiplier - The lightmap resolution multiplier.
      * @param {number} settings.render.lightmapMaxResolution - The maximum lightmap resolution.
      * @param {number} settings.render.lightmapMode - The lightmap baking mode. Can be:
@@ -1390,21 +1422,28 @@ class AppBase extends EventHandler {
      * - {@link BAKE_COLOR}: single color lightmap
      * - {@link BAKE_COLORDIR}: single color lightmap + dominant light direction (used for bump/specular)
      *
-     * @param {boolean} settings.render.ambientBake - Enable baking ambient light into lightmaps.
-     * @param {number} settings.render.ambientBakeNumSamples - Number of samples to use when baking ambient light.
-     * @param {number} settings.render.ambientBakeSpherePart - How much of the sphere to include when baking ambient light.
-     * @param {number} settings.render.ambientBakeOcclusionBrightness - Brightness of the baked ambient occlusion.
-     * @param {number} settings.render.ambientBakeOcclusionContrast - Contrast of the baked ambient occlusion.
+     * @param {boolean} [settings.render.lightmapFilterEnabled] - Enables bilateral filter on runtime baked color lightmaps. Defaults to false.
+     * @param {number} [settings.render.lightmapFilterRange] - Sets the range parameter of the bilateral filter. Defaults to 10.
+     * @param {number} [settings.render.lightmapFilterSmoothness] - Sets the spatial parameter of the bilateral filter. Defaults to 0.2.
+     *
+     * @param {boolean} [settings.render.ambientBake] - Enable baking ambient light into lightmaps. Defaults to false.
+     * @param {number} [settings.render.ambientBakeNumSamples] - Number of samples to use when baking ambient light. Defaults to 1.
+     * @param {number} [settings.render.ambientBakeSpherePart] - How much of the sphere to include when baking ambient light. Defaults to 0.4.
+     * @param {number} [settings.render.ambientBakeOcclusionBrightness] - Brightness of the baked ambient occlusion. Defaults to 0.
+     * @param {number} [settings.render.ambientBakeOcclusionContrast] - Contrast of the baked ambient occlusion. Defaults to 0.
      * @param {number} settings.render.ambientLuminance - Lux (lm/m^2) value for ambient light intensity.
      *
-     * @param {boolean} settings.render.clusteredLightingEnabled - Enable clustered lighting.
-     * @param {boolean} settings.render.lightingShadowsEnabled - If set to true, the clustered lighting will support shadows.
-     * @param {boolean} settings.render.lightingCookiesEnabled - If set to true, the clustered lighting will support cookie textures.
-     * @param {boolean} settings.render.lightingAreaLightsEnabled - If set to true, the clustered lighting will support area lights.
-     * @param {number} settings.render.lightingShadowAtlasResolution - Resolution of the atlas texture storing all non-directional shadow textures.
-     * @param {number} settings.render.lightingCookieAtlasResolution - Resolution of the atlas texture storing all non-directional cookie textures.
-     * @param {number} settings.render.lightingMaxLightsPerCell - Maximum number of lights a cell can store.
-     * @param {number} settings.render.lightingShadowType - The type of shadow filtering used by all shadows. Can be:
+     * @param {boolean} [settings.render.clusteredLightingEnabled] - Enable clustered lighting. Defaults to false.
+     * @param {boolean} [settings.render.lightingShadowsEnabled] - If set to true, the clustered lighting will support shadows. Defaults to true.
+     * @param {boolean} [settings.render.lightingCookiesEnabled] - If set to true, the clustered lighting will support cookie textures. Defaults to false.
+     * @param {boolean} [settings.render.lightingAreaLightsEnabled] - If set to true, the clustered lighting will support area lights. Defaults to false.
+     * @param {number} [settings.render.lightingShadowAtlasResolution] - Resolution of the atlas texture storing all non-directional shadow textures. Defaults to 2048.
+     * @param {number} [settings.render.lightingCookieAtlasResolution] - Resolution of the atlas texture storing all non-directional cookie textures. Defaults to 2048.
+     * @param {number} [settings.render.lightingMaxLightsPerCell] - Maximum number of lights a cell can store. Defaults to 255.
+     * @param {number} [settings.render.lightingMaxLights] - Maximum number of lights the clustered lighting can use in a single
+     * frame. Keep this as low as the scene allows, as a larger value has a per-frame cost. The value is limited by the maximum
+     * texture size supported by the device. Defaults to 255.
+     * @param {number} [settings.render.lightingShadowType] - The type of shadow filtering used by all shadows. Can be:
      *
      * - {@link SHADOW_PCF1_32F}
      * - {@link SHADOW_PCF3_32F}
@@ -1413,10 +1452,32 @@ class AppBase extends EventHandler {
      * - {@link SHADOW_PCF3_16F}
      * - {@link SHADOW_PCF5_16F}
      *
-     * @param {Vec3} settings.render.lightingCells - Number of cells along each world space axis the space containing lights
-     * is subdivided into.
+     * Defaults to {@link SHADOW_PCF3_32F}.
+     * @param {number[]} [settings.render.lightingCells] - Number of cells along each world space axis the space containing lights
+     * is subdivided into. Defaults to [10, 3, 10].
      *
      * Only lights with bakeDir=true will be used for generating the dominant light direction.
+     * @param {boolean} [settings.render.gsplatRadialSorting] - Enables radial sorting of Gaussian splats. Defaults to false.
+     * @param {number} [settings.render.gsplatLodUpdateDistance] - Distance threshold in world units to trigger gsplat LOD updates. Defaults to 1.
+     * @param {number} [settings.render.gsplatLodUpdateAngle] - Angle threshold in degrees to trigger gsplat LOD updates based on camera rotation. Defaults to 0.
+     * @param {number} [settings.render.gsplatLodBehindPenalty] - Multiplier applied to effective distance for gsplat nodes behind the camera. Defaults to 1.
+     * @param {number} [settings.render.gsplatLodUnderfillLimit] - Maximum number of gsplat LOD levels allowed below the optimal level when optimal data is not resident. Defaults to 0.
+     * @param {number} [settings.render.gsplatSplatBudget] - Target number of splats across all GSplats in the scene. LOD levels are chosen globally to stay within it; a non-positive value is not a way to disable this and the default is used instead. Defaults to 1000000.
+     * @param {string} [settings.render.gsplatLodMode] - How LOD levels are chosen for streamed GSplats: 'distance' (default) orders detail by camera distance alone in concentric bands and ignores error metadata; 'error' spends the budget by measured approximation error, lifting sparse regions that distance leaves coarse at a higher memory cost.
+     * @param {number} [settings.render.gsplatAlphaClip] - Alpha threshold for gsplat shadow, pick, and prepass rendering. Defaults to 0.3.
+     * @param {number} [settings.render.gsplatAlphaClipForward] - Alpha threshold for the forward gsplat rendering pass. Defaults to 1 / 255.
+     * @param {number} [settings.render.gsplatMinPixelSize] - Minimum screen-space pixel size below which splats are discarded. Defaults to 2.
+     * @param {number} [settings.render.gsplatMinContribution] - Minimum visual contribution threshold for the compute gsplat renderer. Defaults to 3.
+     * @param {number} [settings.render.gsplatFoveationStrength] - Foveated contribution culling strength. Defaults to 0.
+     * @param {number} [settings.render.gsplatFoveationCenter] - Protected centre radius for foveated contribution culling. Defaults to 0.3.
+     * @param {boolean} [settings.render.gsplatAntiAlias] - Enables anti-aliasing compensation for Gaussian splats. Defaults to false.
+     * @param {boolean} [settings.render.gsplatUseFog] - Whether to apply scene fog to Gaussian splats. Defaults to true.
+     * @param {boolean} [settings.render.gsplatUseTonemap] - Whether to apply the camera's tonemapping and the
+     * scene exposure to Gaussian splats. Defaults to true.
+     * @param {number} [settings.render.gsplatColorUpdateAngle] - Viewing angle threshold in degrees for triggering gsplat spherical harmonics color updates. Defaults to 10.
+     * @param {number} [settings.render.gsplatCooldownTicks] - Number of update ticks before unloading unused streamed gsplat resources. Defaults to 100.
+     * @param {string} [settings.render.gsplatDataFormat] - Work buffer data format for gsplat rendering. One of the GSPLATDATA_* constants. Defaults to {@link GSPLATDATA_COMPACT}.
+     * @param {boolean} [settings.render.gsplatEnableIds] - Enables per-component ID storage in the gsplat work buffer. Defaults to false.
      * @example
      *
      * const settings = {
@@ -1447,7 +1508,8 @@ class AppBase extends EventHandler {
     applySceneSettings(settings) {
         let asset;
 
-        if (this.systems.rigidbody && typeof Ammo !== 'undefined') {
+        // gravity is engine state - the physics backend applies it when present
+        if (this.systems.rigidbody) {
             const [x, y, z] = settings.physics.gravity;
             this.systems.rigidbody.gravity.set(x, y, z);
         }
@@ -1491,27 +1553,19 @@ class AppBase extends EventHandler {
      */
     setSkybox(asset) {
         if (asset !== this._skyboxAsset) {
-            const onSkyboxRemoved = () => {
-                this.setSkybox(null);
-            };
-
-            const onSkyboxChanged = () => {
-                this.scene.setSkybox(this._skyboxAsset ? this._skyboxAsset.resources : null);
-            };
-
             // cleanup previous asset
             if (this._skyboxAsset) {
-                this.assets.off(`load:${this._skyboxAsset.id}`, onSkyboxChanged, this);
-                this.assets.off(`remove:${this._skyboxAsset.id}`, onSkyboxRemoved, this);
-                this._skyboxAsset.off('change', onSkyboxChanged, this);
+                this.assets.off(`load:${this._skyboxAsset.id}`, this._onSkyboxChanged, this);
+                this.assets.off(`remove:${this._skyboxAsset.id}`, this._onSkyboxRemoved, this);
+                this._skyboxAsset.off('change', this._onSkyboxChanged, this);
             }
 
             // set new asset
             this._skyboxAsset = asset;
             if (this._skyboxAsset) {
-                this.assets.on(`load:${this._skyboxAsset.id}`, onSkyboxChanged, this);
-                this.assets.once(`remove:${this._skyboxAsset.id}`, onSkyboxRemoved, this);
-                this._skyboxAsset.on('change', onSkyboxChanged, this);
+                this.assets.on(`load:${this._skyboxAsset.id}`, this._onSkyboxChanged, this);
+                this.assets.once(`remove:${this._skyboxAsset.id}`, this._onSkyboxRemoved, this);
+                this._skyboxAsset.on('change', this._onSkyboxChanged, this);
 
                 if (this.scene.skyboxMip === 0 && !this._skyboxAsset.loadFaces) {
                     this._skyboxAsset.loadFaces = true;
@@ -1520,8 +1574,18 @@ class AppBase extends EventHandler {
                 this.assets.load(this._skyboxAsset);
             }
 
-            onSkyboxChanged();
+            this._onSkyboxChanged();
         }
+    }
+
+    /** @private */
+    _onSkyboxRemoved() {
+        this.setSkybox(null);
+    }
+
+    /** @private */
+    _onSkyboxChanged() {
+        this.scene.setSkybox(this._skyboxAsset ? this._skyboxAsset.resources : null);
     }
 
     /** @private */
@@ -1551,26 +1615,27 @@ class AppBase extends EventHandler {
      *
      * @param {Vec3} start - The start world space coordinate of the line.
      * @param {Vec3} end - The end world space coordinate of the line.
-     * @param {Color} [color] - The color of the line. It defaults to white if not specified.
+     * @param {Color} [color] - The color of the line, specified in sRGB color space. It defaults
+     * to white if not specified.
      * @param {boolean} [depthTest] - Specifies if the line is depth tested against the depth
      * buffer. Defaults to true.
      * @param {Layer} [layer] - The layer to render the line into. Defaults to {@link LAYERID_IMMEDIATE}.
      * @example
      * // Render a 1-unit long white line
-     * const start = new pc.Vec3(0, 0, 0);
-     * const end = new pc.Vec3(1, 0, 0);
+     * const start = new Vec3(0, 0, 0);
+     * const end = new Vec3(1, 0, 0);
      * app.drawLine(start, end);
      * @example
      * // Render a 1-unit long red line which is not depth tested and renders on top of other geometry
-     * const start = new pc.Vec3(0, 0, 0);
-     * const end = new pc.Vec3(1, 0, 0);
-     * app.drawLine(start, end, pc.Color.RED, false);
+     * const start = new Vec3(0, 0, 0);
+     * const end = new Vec3(1, 0, 0);
+     * app.drawLine(start, end, Color.RED, false);
      * @example
      * // Render a 1-unit long white line into the world layer
-     * const start = new pc.Vec3(0, 0, 0);
-     * const end = new pc.Vec3(1, 0, 0);
-     * const worldLayer = app.scene.layers.getLayerById(pc.LAYERID_WORLD);
-     * app.drawLine(start, end, pc.Color.WHITE, true, worldLayer);
+     * const start = new Vec3(0, 0, 0);
+     * const end = new Vec3(1, 0, 0);
+     * const worldLayer = app.scene.layers.getLayerById(LAYERID_WORLD);
+     * app.drawLine(start, end, Color.WHITE, true, worldLayer);
      */
     drawLine(start, end, color, depthTest, layer) {
         this.scene.drawLine(start, end, color, depthTest, layer);
@@ -1593,26 +1658,26 @@ class AppBase extends EventHandler {
      * @param {Layer} [layer] - The layer to render the lines into. Defaults to {@link LAYERID_IMMEDIATE}.
      * @example
      * // Render a single line, with unique colors for each point
-     * const start = new pc.Vec3(0, 0, 0);
-     * const end = new pc.Vec3(1, 0, 0);
-     * app.drawLines([start, end], [pc.Color.RED, pc.Color.WHITE]);
+     * const start = new Vec3(0, 0, 0);
+     * const end = new Vec3(1, 0, 0);
+     * app.drawLines([start, end], [Color.RED, Color.WHITE]);
      * @example
      * // Render 2 discrete line segments
      * const points = [
      *     // Line 1
-     *     new pc.Vec3(0, 0, 0),
-     *     new pc.Vec3(1, 0, 0),
+     *     new Vec3(0, 0, 0),
+     *     new Vec3(1, 0, 0),
      *     // Line 2
-     *     new pc.Vec3(1, 1, 0),
-     *     new pc.Vec3(1, 1, 1)
+     *     new Vec3(1, 1, 0),
+     *     new Vec3(1, 1, 1)
      * ];
      * const colors = [
      *     // Line 1
-     *     pc.Color.RED,
-     *     pc.Color.YELLOW,
+     *     Color.RED,
+     *     Color.YELLOW,
      *     // Line 2
-     *     pc.Color.CYAN,
-     *     pc.Color.BLUE
+     *     Color.CYAN,
+     *     Color.BLUE
      * ];
      * app.drawLines(points, colors);
      */
@@ -1628,8 +1693,8 @@ class AppBase extends EventHandler {
      * @param {number[]} positions - An array of points to draw lines between. Each point is
      * represented by 3 numbers - x, y and z coordinate.
      * @param {number[]|Color} colors - A single color for all lines, or an array of colors to color
-     * the lines. If an array is specified, number of colors it stores must match the number of
-     * positions provided.
+     * the lines. If an array is specified, the number of colors it stores must match the number
+     * of positions provided.
      * @param {boolean} [depthTest] - Specifies if the lines are depth tested against the depth
      * buffer. Defaults to true.
      * @param {Layer} [layer] - The layer to render the lines into. Defaults to {@link LAYERID_IMMEDIATE}.
@@ -1658,150 +1723,39 @@ class AppBase extends EventHandler {
     }
 
     /**
-     * Draws a wireframe sphere with center, radius and color.
-     *
-     * @param {Vec3} center - The center of the sphere.
-     * @param {number} radius - The radius of the sphere.
-     * @param {Color} [color] - The color of the sphere. It defaults to white if not specified.
-     * @param {number} [segments] - Number of line segments used to render the circles forming the
-     * sphere. Defaults to 20.
-     * @param {boolean} [depthTest] - Specifies if the sphere lines are depth tested against the
-     * depth buffer. Defaults to true.
-     * @param {Layer} [layer] - The layer to render the sphere into. Defaults to {@link LAYERID_IMMEDIATE}.
-     * @example
-     * // Render a red wire sphere with radius of 1
-     * const center = new pc.Vec3(0, 0, 0);
-     * app.drawWireSphere(center, 1.0, pc.Color.RED);
+     * @deprecated Use {@link WireRenderer#sphere} instead.
      * @ignore
      */
-    drawWireSphere(center, radius, color = Color.WHITE, segments = 20, depthTest = true, layer = this.scene.defaultDrawLayer) {
-        this.scene.immediate.drawWireSphere(center, radius, color, segments, depthTest, layer);
+    drawWireSphere() {
+        Debug.removed('AppBase#drawWireSphere is removed. Use WireRenderer#sphere instead.');
     }
 
     /**
-     * Draws a wireframe axis aligned box specified by min and max points and color.
-     *
-     * @param {Vec3} minPoint - The min corner point of the box.
-     * @param {Vec3} maxPoint - The max corner point of the box.
-     * @param {Color} [color] - The color of the sphere. It defaults to white if not specified.
-     * @param {boolean} [depthTest] - Specifies if the sphere lines are depth tested against the
-     * depth buffer. Defaults to true.
-     * @param {Layer} [layer] - The layer to render the sphere into. Defaults to {@link LAYERID_IMMEDIATE}.
-     * @param {Mat4} [mat] - Matrix to transform the box before rendering.
-     * @example
-     * // Render a red wire aligned box
-     * const min = new pc.Vec3(-1, -1, -1);
-     * const max = new pc.Vec3(1, 1, 1);
-     * app.drawWireAlignedBox(min, max, pc.Color.RED);
+     * @deprecated Use {@link WireRenderer#boxMinMax} instead.
      * @ignore
      */
-    drawWireAlignedBox(minPoint, maxPoint, color = Color.WHITE, depthTest = true, layer = this.scene.defaultDrawLayer, mat) {
-        this.scene.immediate.drawWireAlignedBox(minPoint, maxPoint, color, depthTest, layer, mat);
+    drawWireAlignedBox() {
+        Debug.removed('AppBase#drawWireAlignedBox is removed. Use WireRenderer#boxMinMax instead.');
     }
 
-    /**
-     * Draw meshInstance at this frame
-     *
-     * @param {MeshInstance} meshInstance - The mesh instance
-     * to draw.
-     * @param {Layer} [layer] - The layer to render the mesh instance into. Defaults to
-     * {@link LAYERID_IMMEDIATE}.
-     * @ignore
-     */
-    drawMeshInstance(meshInstance, layer = this.scene.defaultDrawLayer) {
-        this.scene.immediate.drawMesh(null, null, null, meshInstance, layer);
+    drawMeshInstance() {
+        Debug.removed('AppBase#drawMeshInstance is removed. Use Layer#addMeshInstances instead.');
     }
 
-    /**
-     * Draw mesh at this frame.
-     *
-     * @param {Mesh} mesh - The mesh to draw.
-     * @param {Material} material - The material to use to render the mesh.
-     * @param {Mat4} matrix - The matrix to use to render the mesh.
-     * @param {Layer} [layer] - The layer to render the mesh into. Defaults to {@link LAYERID_IMMEDIATE}.
-     * @ignore
-     */
-    drawMesh(mesh, material, matrix, layer = this.scene.defaultDrawLayer) {
-        this.scene.immediate.drawMesh(material, matrix, mesh, null, layer);
+    drawMesh() {
+        Debug.removed('AppBase#drawMesh is removed. Create a MeshInstance and use Layer#addMeshInstances instead.');
     }
 
-    /**
-     * Draw quad of size [-0.5, 0.5] at this frame.
-     *
-     * @param {Mat4} matrix - The matrix to use to render the quad.
-     * @param {Material} material - The material to use to render the quad.
-     * @param {Layer} [layer] - The layer to render the quad into. Defaults to {@link LAYERID_IMMEDIATE}.
-     * @ignore
-     */
-    drawQuad(matrix, material, layer = this.scene.defaultDrawLayer) {
-        this.scene.immediate.drawMesh(material, matrix, this.scene.immediate.getQuadMesh(), null, layer);
+    drawQuad() {
+        Debug.removed('AppBase#drawQuad is removed. Create a quad MeshInstance and use Layer#addMeshInstances, or use TextureRenderer#draw for texture previews.');
     }
 
-    /**
-     * Draws a texture at [x, y] position on screen, with size [width, height]. The origin of the
-     * screen is top-left [0, 0]. Coordinates and sizes are in projected space (-1 .. 1).
-     *
-     * @param {number} x - The x coordinate on the screen of the top left corner of the texture.
-     * Should be in the range [-1, 1].
-     * @param {number} y - The y coordinate on the screen of the top left corner of the texture.
-     * Should be in the range [-1, 1].
-     * @param {number} width - The width of the rectangle of the rendered texture. Should be in the
-     * range [0, 2].
-     * @param {number} height - The height of the rectangle of the rendered texture. Should be in
-     * the range [0, 2].
-     * @param {Texture} texture - The texture to render.
-     * @param {Material} material - The material used when rendering the texture.
-     * @param {Layer} [layer] - The layer to render the texture into. Defaults to {@link LAYERID_IMMEDIATE}.
-     * @param {boolean} [filterable] - Indicate if the texture can be sampled using filtering.
-     * Passing false uses unfiltered sampling, allowing a depth texture to be sampled on WebGPU.
-     * Defaults to true.
-     * @ignore
-     */
-    drawTexture(x, y, width, height, texture, material, layer = this.scene.defaultDrawLayer, filterable = true) {
-
-        // only WebGPU supports filterable parameter to be false, allowing a depth texture / shadow
-        // map to be fetched (without filtering) and rendered
-        if (filterable === false && !this.graphicsDevice.isWebGPU) {
-            return;
-        }
-
-        // TODO: if this is used for anything other than debug texture display, we should optimize this to avoid allocations
-        const matrix = new Mat4();
-        matrix.setTRS(new Vec3(x, y, 0.0), Quat.IDENTITY, new Vec3(width, -height, 0.0));
-
-        if (!material) {
-            material = new ShaderMaterial();
-            material.cull = CULLFACE_NONE;
-            material.setParameter('colorMap', texture);
-            material.shaderDesc = filterable ? this.scene.immediate.getTextureShaderDesc(texture.encoding) : this.scene.immediate.getUnfilterableTextureShaderDesc();
-            material.update();
-        }
-
-        this.drawQuad(matrix, material, layer);
+    drawTexture() {
+        Debug.removed('AppBase#drawTexture is removed. Use TextureRenderer#draw instead.');
     }
 
-    /**
-     * Draws a depth texture at [x, y] position on screen, with size [width, height]. The origin of
-     * the screen is top-left [0, 0]. Coordinates and sizes are in projected space (-1 .. 1).
-     *
-     * @param {number} x - The x coordinate on the screen of the top left corner of the texture.
-     * Should be in the range [-1, 1].
-     * @param {number} y - The y coordinate on the screen of the top left corner of the texture.
-     * Should be in the range [-1, 1].
-     * @param {number} width - The width of the rectangle of the rendered texture. Should be in the
-     * range [0, 2].
-     * @param {number} height - The height of the rectangle of the rendered texture. Should be in
-     * the range [0, 2].
-     * @param {Layer} [layer] - The layer to render the texture into. Defaults to {@link LAYERID_IMMEDIATE}.
-     * @ignore
-     */
-    drawDepthTexture(x, y, width, height, layer = this.scene.defaultDrawLayer) {
-        const material = new ShaderMaterial();
-        material.cull = CULLFACE_NONE;
-        material.shaderDesc = this.scene.immediate.getDepthTextureShaderDesc();
-        material.update();
-
-        this.drawTexture(x, y, width, height, null, material, layer);
+    drawDepthTexture() {
+        Debug.removed('AppBase#drawDepthTexture is removed. Use TextureRenderer#sceneDepth instead.');
     }
 
     /**
@@ -1823,11 +1777,12 @@ class AppBase extends EventHandler {
         this.fire('destroy', this); // fire destroy event
         this.off('librariesloaded');
 
+        // Clean up gsplat sort timing event listener
+        this._gsplatSortedEvt?.off();
+        this._gsplatSortedEvt = null;
+
         if (typeof document !== 'undefined') {
             document.removeEventListener('visibilitychange', this._visibilityChangeHandler, false);
-            document.removeEventListener('mozvisibilitychange', this._visibilityChangeHandler, false);
-            document.removeEventListener('msvisibilitychange', this._visibilityChangeHandler, false);
-            document.removeEventListener('webkitvisibilitychange', this._visibilityChangeHandler, false);
         }
         this._visibilityChangeHandler = null;
 
@@ -1862,25 +1817,7 @@ class AppBase extends EventHandler {
             this.gamepads = null;
         }
 
-        if (this.controller) {
-            this.controller = null;
-        }
-
         this.systems.destroy();
-
-        // layer composition
-        if (this.scene.layers) {
-            this.scene.layers.destroy();
-        }
-
-        // destroy all texture resources
-        const assets = this.assets.list();
-        for (let i = 0; i < assets.length; i++) {
-            assets[i].unload();
-            assets[i].off();
-        }
-        this.assets.off();
-
 
         // destroy bundle registry
         this.bundles.destroy();
@@ -1894,9 +1831,6 @@ class AppBase extends EventHandler {
 
         this.loader.destroy();
         this.loader = null;
-
-        this.scene.destroy();
-        this.scene = null;
 
         this.systems = null;
         this.context = null;
@@ -1929,10 +1863,21 @@ class AppBase extends EventHandler {
         this.renderer.destroy();
         this.renderer = null;
 
+        // destroy all resources. Do this after managers have been destroyed
+        const assets = this.assets.list();
+        for (let i = 0; i < assets.length; i++) {
+            assets[i].unload();
+            assets[i].off();
+        }
+        this.assets.destroy();
+        this.assets = null;
+
+        // destroy scene after assets are unloaded (components need scene.layers during asset cleanup)
+        this.scene.destroy();
+        this.scene = null;
+
         this.graphicsDevice.destroy();
         this.graphicsDevice = null;
-
-        this.tick = null;
 
         this.off(); // remove all events
 
@@ -1947,12 +1892,18 @@ class AppBase extends EventHandler {
             setApplication(null);
         }
 
+        // clear the module scoped reference, which would otherwise keep the destroyed application
+        // alive. Skipped if another application has already taken over.
+        if (app === this) {
+            app = null;
+        }
+
         AppBase.cancelTick(this);
     }
 
     static cancelTick(app) {
         if (app.frameRequestId) {
-            window.cancelAnimationFrame(app.frameRequestId);
+            cancelAnimationFrame(app.frameRequestId);
             app.frameRequestId = undefined;
         }
     }
@@ -1974,116 +1925,153 @@ class AppBase extends EventHandler {
      */
     _registerSceneImmediate(scene) {
         this.on('postrender', scene.immediate.onPostRender, scene.immediate);
+
+        // Listen for gsplat sort timing events and accumulate
+        this._gsplatSortedEvt = scene.on('gsplat:sorted', (sortTime) => {
+            this.stats.frame.gsplatSort += sortTime;
+        });
+    }
+
+    /**
+     * Reports whether the document is in fullscreen mode.
+     *
+     * @returns {boolean} True if the document is in fullscreen.
+     * @ignore
+     * @deprecated Use the Fullscreen API directly.
+     */
+    isFullscreen() {
+        Debug.deprecated('AppBase#isFullscreen is deprecated. Use the Fullscreen API directly.');
+
+        return !!document.fullscreenElement;
+    }
+
+    /**
+     * Requests fullscreen mode on the given element.
+     *
+     * @param {Element} [element] - The element to make fullscreen. Defaults to the graphics
+     * device canvas.
+     * @param {Function} [success] - Called once fullscreen has been entered.
+     * @param {Function} [error] - Called if entering fullscreen fails.
+     * @ignore
+     * @deprecated Use the Fullscreen API directly.
+     */
+    enableFullscreen(element, success, error) {
+        Debug.deprecated('AppBase#enableFullscreen is deprecated. Use the Fullscreen API directly.');
+
+        element = element || this.graphicsDevice.canvas;
+
+        // success callback
+        const s = function () {
+            success();
+            document.removeEventListener('fullscreenchange', s);
+        };
+
+        // error callback
+        const e = function () {
+            error();
+            document.removeEventListener('fullscreenerror', e);
+        };
+
+        if (success) {
+            document.addEventListener('fullscreenchange', s, false);
+        }
+
+        if (error) {
+            document.addEventListener('fullscreenerror', e, false);
+        }
+
+        if (element.requestFullscreen) {
+            element.requestFullscreen(Element.ALLOW_KEYBOARD_INPUT);
+        } else {
+            error();
+        }
+    }
+
+    /**
+     * Exits fullscreen mode.
+     *
+     * @param {Function} [success] - Called once fullscreen has been exited.
+     * @ignore
+     * @deprecated Use the Fullscreen API directly.
+     */
+    disableFullscreen(success) {
+        Debug.deprecated('AppBase#disableFullscreen is deprecated. Use the Fullscreen API directly.');
+
+        // success callback
+        const s = function () {
+            success();
+            document.removeEventListener('fullscreenchange', s);
+        };
+
+        if (success) {
+            document.addEventListener('fullscreenchange', s, false);
+        }
+
+        document.exitFullscreen();
+    }
+
+    /**
+     * Gets the URL of a scene by name.
+     *
+     * @param {string} name - The name of the scene.
+     * @returns {string|null} The URL of the scene, or null if not found.
+     * @ignore
+     * @deprecated Use {@link AppBase#scenes} and {@link SceneRegistry#find} instead.
+     */
+    getSceneUrl(name) {
+        Debug.deprecated('AppBase#getSceneUrl is deprecated. Use AppBase#scenes and SceneRegistry#find instead.');
+        const entry = this.scenes.find(name);
+        if (entry) {
+            return entry.url;
+        }
+        return null;
+    }
+
+    /**
+     * Loads a scene.
+     *
+     * @param {string} url - The URL of the scene file.
+     * @param {Function} callback - Called when the scene has loaded.
+     * @ignore
+     * @deprecated Use {@link AppBase#scenes} and {@link SceneRegistry#loadScene} instead.
+     */
+    loadScene(url, callback) {
+        Debug.deprecated('AppBase#loadScene is deprecated. Use AppBase#scenes and SceneRegistry#loadScene instead.');
+        this.scenes.loadScene(url, callback);
+    }
+
+    /**
+     * Loads a scene hierarchy.
+     *
+     * @param {string} url - The URL of the scene file.
+     * @param {Function} callback - Called when the scene hierarchy has loaded.
+     * @ignore
+     * @deprecated Use {@link AppBase#scenes} and {@link SceneRegistry#loadSceneHierarchy} instead.
+     */
+    loadSceneHierarchy(url, callback) {
+        Debug.deprecated('AppBase#loadSceneHierarchy is deprecated. Use AppBase#scenes and SceneRegistry#loadSceneHierarchy instead.');
+        this.scenes.loadSceneHierarchy(url, callback);
+    }
+
+    /**
+     * Loads scene settings.
+     *
+     * @param {string} url - The URL of the scene file.
+     * @param {Function} callback - Called when the scene settings have loaded.
+     * @ignore
+     * @deprecated Use {@link AppBase#scenes} and {@link SceneRegistry#loadSceneSettings} instead.
+     */
+    loadSceneSettings(url, callback) {
+        Debug.deprecated('AppBase#loadSceneSettings is deprecated. Use AppBase#scenes and SceneRegistry#loadSceneSettings instead.');
+        this.scenes.loadSceneSettings(url, callback);
     }
 }
 
-// static data
-const _frameEndData = {};
-
-/**
- * Create tick function to be wrapped in closure.
- *
- * @param {AppBase} _app - The application.
- * @returns {MakeTickCallback} The tick function.
- * @private
- */
-const makeTick = function (_app) {
-    const application = _app;
-    /**
-     * @param {number} [timestamp] - The timestamp supplied by requestAnimationFrame.
-     * @param {XRFrame} [frame] - XRFrame from requestAnimationFrame callback.
-     */
-    return function (timestamp, frame) {
-        if (!application.graphicsDevice) {
-            return;
-        }
-
-        // cancel any hanging rAF to avoid multiple rAF callbacks per frame
-        if (application.frameRequestId) {
-            application.xr?.session?.cancelAnimationFrame(application.frameRequestId);
-            cancelAnimationFrame(application.frameRequestId);
-            application.frameRequestId = null;
-        }
-
-        application._inFrameUpdate = true;
-
-        setApplication(application);
-
-        // have current application pointer in pc
-        app = application;
-
-        const currentTime = application._processTimestamp(timestamp) || now();
-        const ms = currentTime - (application._time || currentTime);
-        let dt = ms / 1000.0;
-        dt = math.clamp(dt, 0, application.maxDeltaTime);
-        dt *= application.timeScale;
-
-        application._time = currentTime;
-
-        // Submit a request to queue up a new animation frame immediately
-        if (application.xr?.session) {
-            application.frameRequestId = application.xr.session.requestAnimationFrame(application.tick);
-        } else {
-            application.frameRequestId = platform.browser || platform.worker ? requestAnimationFrame(application.tick) : null;
-        }
-
-        if (application.graphicsDevice.contextLost) {
-            return;
-        }
-
-        application._fillFrameStatsBasic(currentTime, dt, ms);
-
-        // #if _PROFILER
-        application._fillFrameStats();
-        // #endif
-
-        application.fire('frameupdate', ms);
-
-        let shouldRenderFrame = true;
-
-        if (frame) {
-            shouldRenderFrame = application.xr?.update(frame);
-            application.graphicsDevice.defaultFramebuffer = frame.session.renderState.baseLayer.framebuffer;
-        } else {
-            application.graphicsDevice.defaultFramebuffer = null;
-        }
-
-        if (shouldRenderFrame) {
-
-            Debug.trace(TRACEID_RENDER_FRAME, `---- Frame ${application.frame}`);
-            Debug.trace(TRACEID_RENDER_FRAME_TIME, `-- UpdateStart ${now().toFixed(2)}ms`);
-
-            application.update(dt);
-
-            application.fire('framerender');
-
-
-            if (application.autoRender || application.renderNextFrame) {
-
-                Debug.trace(TRACEID_RENDER_FRAME_TIME, `-- RenderStart ${now().toFixed(2)}ms`);
-
-                application.updateCanvasSize();
-                application.frameStart();
-                application.render();
-                application.frameEnd();
-                application.renderNextFrame = false;
-
-                Debug.trace(TRACEID_RENDER_FRAME_TIME, `-- RenderEnd ${now().toFixed(2)}ms`);
-            }
-
-            // set event data
-            _frameEndData.timestamp = now();
-            _frameEndData.target = application;
-
-            application.fire('frameend', _frameEndData);
-        }
-
-        application._inFrameUpdate = false;
-
-        if (application._destroyRequested) {
-            application.destroy();
-        }
-    };
-};
-
 export { app, AppBase };
+
+// ForwardRenderer#renderComposition is deprecated and patched here, rather than declared on the
+// class, because it needs getApplication and scene code must not import from framework.
+ForwardRenderer.prototype.renderComposition = function (comp) {
+    Debug.deprecated('ForwardRenderer#renderComposition is deprecated. Use AppBase.renderComposition instead.');
+    getApplication().renderComposition(comp);
+};

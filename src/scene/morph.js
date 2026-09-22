@@ -237,12 +237,10 @@ class Morph extends RefCountedObject {
         // allocate texture arrays to store data from all morph targets
         if (texturesDataPositions.length > 0) {
             this.targetsTexturePositions = this._createTexture('MorphPositionsTexture', this._textureFormat, targets.length, [texturesDataPositions]);
-            this.targetsTexturePositions.upload();
         }
 
         if (texturesDataNormals.length > 0) {
             this.targetsTextureNormals = this._createTexture('MorphNormalsTexture', this._textureFormat, targets.length, [texturesDataNormals]);
-            this.targetsTextureNormals.upload();
         }
 
         // create vertex stream with vertex_id used to map vertex to texture
@@ -262,6 +260,21 @@ class Morph extends RefCountedObject {
     get targets() {
         return this._targets;
     }
+
+    // ---- deprecated block start ----
+
+    /**
+     * @deprecated Use Morph#targets instead.
+     * @param {number} index - The index of the morph target.
+     * @returns {MorphTarget} The morph target at the given index.
+     * @ignore
+     */
+    getTarget(index) {
+        Debug.deprecated('Morph#getTarget is deprecated. Use Morph#targets instead.');
+        return this.targets[index];
+    }
+
+    // ---- deprecated block end ----
 
     _updateMorphFlags() {
 
@@ -285,8 +298,8 @@ class Morph extends RefCountedObject {
      *
      * @param {string} name - The name of the texture.
      * @param {number} format - The format of the texture.
-     * @param {Array} [levels] - The levels of the texture.
      * @param {number} [arrayLength] - The length of the texture array.
+     * @param {Array} [levels] - The levels of the texture.
      * @returns {Texture} The created texture.
      * @private
      */

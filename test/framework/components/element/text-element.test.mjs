@@ -44,7 +44,7 @@ describe('TextElement', function () {
         element.width = 200;
 
         fontAsset = new Asset('arial.json', 'font', {
-            url: 'http://localhost:3000/test/assets/fonts/arial.json'
+            url: '/test/assets/fonts/arial.json'
         });
 
         fontAsset.ready(function () {
@@ -67,6 +67,77 @@ describe('TextElement', function () {
     function assertLineContents(expectedLineContents) {
         expect(element.lines.length).to.equal(expectedLineContents.length);
         expect(element.lines).to.deep.equal(expectedLineContents);
+    }
+
+    // x position of the left edge of every glyph quad, in the order the glyphs were laid out
+    function quadLefts() {
+        const meshInfo = element._text._meshInfo[0];
+        const lefts = [];
+        for (let quad = 0; quad < meshInfo.quad; quad++) {
+            lefts.push(meshInfo.positions[quad * 4 * 3]);
+        }
+        return lefts;
+    }
+
+    // range of glyph quads produced by each line - every symbol on a line produces one quad
+    function lineQuadRanges() {
+        const ranges = [];
+        let start = 0;
+        for (const line of element.lines) {
+            const chars = Array.from(line);
+            ranges.push({ start: start, end: start + chars.length - 1, chars: chars });
+            start += chars.length;
+        }
+        return ranges;
+    }
+
+    // leftmost and rightmost glyph edge of each line
+    function lineInkExtents() {
+        const meshInfo = element._text._meshInfo[0];
+        const extents = [];
+        let quad = 0;
+        for (const line of element.lines) {
+            let left = Infinity;
+            let right = -Infinity;
+            for (const char of Array.from(line)) {
+                if (!/\s/.test(char)) {
+                    const base = quad * 4 * 3;
+                    left = Math.min(left, meshInfo.positions[base], meshInfo.positions[base + 3]);
+                    right = Math.max(right, meshInfo.positions[base], meshInfo.positions[base + 3]);
+                }
+                quad++;
+            }
+            extents.push({ left: left, right: right });
+        }
+        return extents;
+    }
+
+    // A justified line reaches both of the edges that the two extremes of alignment push it to,
+    // at the same time. Which extreme hugs which edge depends on the text direction, so compare
+    // against whichever of the two reaches furthest in each direction.
+    function assertJustifiedLinesAreFlushWithBothEdges() {
+        element.justify = false;
+
+        element.alignment = new Vec2(0, 0.5);
+        const alignedToZero = lineInkExtents();
+
+        element.alignment = new Vec2(1, 0.5);
+        const alignedToOne = lineInkExtents();
+
+        element.justify = true;
+        const justified = lineInkExtents();
+        const lineGaps = element._text._lineGaps;
+
+        let stretchedLines = 0;
+        justified.forEach((extent, i) => {
+            if (lineGaps[i] > 0) {
+                expect(extent.left).to.be.closeTo(Math.min(alignedToZero[i].left, alignedToOne[i].left), 0.001);
+                expect(extent.right).to.be.closeTo(Math.max(alignedToZero[i].right, alignedToOne[i].right), 0.001);
+                stretchedLines++;
+            }
+        });
+
+        expect(stretchedLines).to.be.above(0);
     }
 
     function assertLineColors(expectedLineColors) {
@@ -118,7 +189,7 @@ describe('TextElement', function () {
             });
             return {
                 mapping: mapping,
-                isrtl: true
+                rtl: true
             };
         });
     }
@@ -166,6 +237,194 @@ describe('TextElement', function () {
         expect(element.lines.length).to.equal(1);
         element.wrapLines = true;
         expect(element.lines.length).to.equal(3);
+    });
+
+    it('does not justify text by default', function () {
+        element.fontAsset = fontAsset;
+
+        expect(element.justify).to.equal(false);
+
+        element.text = 'abcde fghij klmno pqrst uvwxyz';
+        const before = quadLefts();
+        element.justify = true;
+        expect(quadLefts()).to.not.deep.equal(before);
+    });
+
+    it('does not justify text when wrapLines is false', function () {
+        element.fontAsset = fontAsset;
+
+        element.wrapLines = false;
+        element.text = 'abcde fghij klmno pqrst uvwxyz';
+        const before = quadLefts();
+
+        element.justify = true;
+        expect(quadLefts()).to.deep.equal(before);
+    });
+
+    it('does not change where lines break when justifying', function () {
+        element.fontAsset = fontAsset;
+
+        element.text = 'abcde fghij klmno pqrst uvwxyz';
+        const before = element.lines.slice();
+
+        element.justify = true;
+        expect(element.lines).to.deep.equal(before);
+    });
+
+    it('justifies a wrapped line flush with both edges of the element', function () {
+        element.fontAsset = fontAsset;
+        element.alignment = new Vec2(0, 0.5);
+
+        element.text = 'abcde fghij klmno pqrst uvwxyz';
+        assertLineContents([
+            'abcde fghij ',
+            'klmno pqrst ',
+            'uvwxyz'
+        ]);
+
+        const before = quadLefts();
+        const slack = element.calculatedWidth - element._text._lineWidths[0];
+        expect(slack).to.be.above(0);
+
+        element.justify = true;
+        const after = quadLefts();
+
+        // the first line has a single gap, so 'abcde' and the space after it stay where they are
+        // and 'fghij' takes up all of the space the line had left over
+        for (let quad = 0; quad <= 5; quad++) {
+            expect(after[quad]).to.be.closeTo(before[quad], 0.001);
+        }
+        for (let quad = 6; quad <= 11; quad++) {
+            expect(after[quad]).to.be.closeTo(before[quad] + slack, 0.001);
+        }
+    });
+
+    it('does not justify the last line of the text', function () {
+        element.fontAsset = fontAsset;
+        element.alignment = new Vec2(0, 0.5);
+
+        element.text = 'abcde fghij klmno pqrst uvwxyz';
+        const ranges = lineQuadRanges();
+        const lastLine = ranges[ranges.length - 1];
+
+        const before = quadLefts();
+        element.justify = true;
+        const after = quadLefts();
+
+        for (let quad = lastLine.start; quad <= lastLine.end; quad++) {
+            expect(after[quad]).to.be.closeTo(before[quad], 0.001);
+        }
+    });
+
+    it('does not justify a line ended by an explicit line break', function () {
+        element.fontAsset = fontAsset;
+        element.alignment = new Vec2(0, 0.5);
+
+        // short enough that neither line wraps, so both lines are unjustifiable - the first
+        // because it ends in a line break and the second because it is the last line
+        element.text = 'ab cd\nef gh';
+        assertLineContents(['ab cd', 'ef gh']);
+
+        const before = quadLefts();
+        element.justify = true;
+        expect(quadLefts()).to.deep.equal(before);
+    });
+
+    it('does not justify a line that has no gaps to widen', function () {
+        element.fontAsset = fontAsset;
+        element.alignment = new Vec2(0, 0.5);
+
+        // a single word broken across lines has no whitespace to stretch
+        element.text = 'abcdefghijklmnopqrstuvwxyz';
+        expect(element.lines.length).to.be.above(1);
+
+        const before = quadLefts();
+        element.justify = true;
+        expect(quadLefts()).to.deep.equal(before);
+    });
+
+    it('widens every gap on a justified line by the same amount', function () {
+        element.fontAsset = fontAsset;
+        element.alignment = new Vec2(0, 0.5);
+        element.width = 300;
+
+        element.text = 'aa bb cc dd ee ff gg hh ii jj kk ll';
+
+        const ranges = lineQuadRanges();
+        const before = quadLefts();
+
+        element.justify = true;
+        const after = quadLefts();
+
+        // gap counts are only tracked while justifying, so they have to be read afterwards
+        const lineGaps = element._text._lineGaps.slice();
+
+        // pick a stretched line with more than one gap in it
+        const lineIndex = lineGaps.findIndex((gaps, i) => gaps > 1 && i < ranges.length - 1);
+        expect(lineIndex).to.be.at.least(0);
+
+        const range = ranges[lineIndex];
+        const slack = element.calculatedWidth - element._text._lineWidths[lineIndex];
+        expect(slack).to.be.above(0);
+
+        // how far the first glyph of each word on the line moved
+        const shifts = [];
+        for (let quad = range.start; quad <= range.end; quad++) {
+            const char = range.chars[quad - range.start];
+            const prevChar = range.chars[quad - range.start - 1];
+            if (!/\s/.test(char) && (quad === range.start || /\s/.test(prevChar))) {
+                shifts.push(after[quad] - before[quad]);
+            }
+        }
+
+        expect(shifts.length).to.equal(lineGaps[lineIndex] + 1);
+
+        // the first word does not move, the last one takes up all of the slack, and the words in
+        // between are spaced evenly, so each word moves one step further than the one before it
+        const step = slack / lineGaps[lineIndex];
+        shifts.forEach((shift, i) => {
+            expect(shift).to.be.closeTo(i * step, 0.001);
+        });
+    });
+
+    it('justifies wrapped lines flush with both edges of the element', function () {
+        element.fontAsset = fontAsset;
+
+        element.text = 'abcde fghij klmno pqrst uvwxyz';
+        assertJustifiedLinesAreFlushWithBothEdges();
+    });
+
+    it('rtl - justifies wrapped lines flush with both edges of the element', function () {
+        registerRtlHandler();
+
+        element.fontAsset = fontAsset;
+        element.rtlReorder = true;
+
+        element.text = 'abcde fghij klmno pqrst uvwxyz';
+
+        // guard against the reorder handler silently failing to turn rtl on, which would leave
+        // this exercising the ltr path and let the rtl behaviour regress unnoticed
+        expect(element._text._rtl).to.equal(true);
+
+        assertJustifiedLinesAreFlushWithBothEdges();
+    });
+
+    it('initializes justify from component data', function () {
+        const other = new Entity();
+        const otherElement = app.systems.element.addComponent(other, {
+            type: 'text',
+            justify: true
+        });
+
+        expect(otherElement.justify).to.equal(true);
+    });
+
+    it('cloning text element clones the justify setting', function () {
+        element.fontAsset = fontAsset;
+        element.justify = true;
+
+        const clone = entity.clone();
+        expect(clone.element.justify).to.equal(true);
     });
 
     it('breaks onto multiple lines if individual lines are too long', function () {
@@ -365,6 +624,19 @@ describe('TextElement', function () {
             'a',
             'bcdef ghijkl'
         ]);
+    });
+
+    it('rtl - reorder handler turns on rtl layout', function () {
+        registerRtlHandler();
+
+        element.fontAsset = fontAsset;
+        element.rtlReorder = true;
+
+        element.text = 'abcde fghij';
+
+        // without this the rtl tests below all run through the ltr path, and the rtl specific
+        // layout code they are meant to cover is never reached
+        expect(element._text._rtl).to.equal(true);
     });
 
     it('rtl - breaks onto multiple lines if individual lines are too long', function () {
@@ -1089,29 +1361,33 @@ describe('TextElement', function () {
     });
 
     it('defaults to white color and opacity 1', function () {
+        element.fontAsset = fontAsset.id;
+        element.text = 'test';
         expect(element.color.r).to.equal(1);
         expect(element.color.g).to.equal(1);
         expect(element.color.b).to.equal(1);
         expect(element.opacity).to.equal(1);
 
         const meshes = element._text._model.meshInstances;
+        expect(meshes.length).to.be.greaterThan(0);
         for (let i = 0; i < meshes.length; i++) {
-            const color = meshes[i].getParameter('material_emissive').data;
+            const color = meshes[i].getParameter('mesh_color').data;
             expect(color[0]).to.equal(1);
             expect(color[1]).to.equal(1);
             expect(color[2]).to.equal(1);
 
-            const opacity = meshes[i].getParameter('material_opacity').data;
+            const opacity = meshes[i].getParameter('mesh_color').data[3];
             expect(opacity).to.equal(1);
         }
     });
 
     it('uses color and opacity passed in addComponent data', function () {
         const e = new Entity();
+        app.root.addChild(e);
         e.addComponent('element', {
             type: 'text',
             text: 'test',
-            fontAsset: element.fontAsset,
+            fontAsset: fontAsset.id,
             color: [0.1, 0.2, 0.3],
             opacity: 0.4
         });
@@ -1121,19 +1397,23 @@ describe('TextElement', function () {
         expect(e.element.color.b).to.be.closeTo(0.3, 0.001);
         expect(e.element.opacity).to.be.closeTo(0.4, 0.001);
 
+        const linear = new Color(0.1, 0.2, 0.3).linear();
         const meshes = e.element._text._model.meshInstances;
+        expect(meshes.length).to.be.greaterThan(0);
         for (let i = 0; i < meshes.length; i++) {
-            const color = meshes[i].getParameter('material_emissive').data;
-            expect(color[0]).to.be.closeTo(0.1, 0.001);
-            expect(color[1]).to.be.closeTo(0.2, 0.001);
-            expect(color[2]).to.be.closeTo(0.3, 0.001);
+            const color = meshes[i].getParameter('mesh_color').data;
+            expect(color[0]).to.be.closeTo(linear.r, 0.001);
+            expect(color[1]).to.be.closeTo(linear.g, 0.001);
+            expect(color[2]).to.be.closeTo(linear.b, 0.001);
 
-            const opacity = meshes[i].getParameter('material_opacity').data;
+            const opacity = meshes[i].getParameter('mesh_color').data[3];
             expect(opacity).to.be.closeTo(0.4, 0.001);
         }
     });
 
     it('changes color', function () {
+        element.fontAsset = fontAsset.id;
+        element.text = 'test';
         element.color = new Color(0.1, 0.2, 0.3);
 
         expect(element.color.r).to.be.closeTo(0.1, 0.001);
@@ -1141,29 +1421,93 @@ describe('TextElement', function () {
         expect(element.color.b).to.be.closeTo(0.3, 0.001);
         expect(element.opacity).to.be.closeTo(1, 0.001);
 
+        const linear = new Color(0.1, 0.2, 0.3).linear();
         const meshes = element._text._model.meshInstances;
+        expect(meshes.length).to.be.greaterThan(0);
         for (let i = 0; i < meshes.length; i++) {
-            const color = meshes[i].getParameter('material_emissive').data;
-            expect(color[0]).to.be.closeTo(0.1, 0.001);
-            expect(color[1]).to.be.closeTo(0.2, 0.001);
-            expect(color[2]).to.be.closeTo(0.3, 0.001);
+            const color = meshes[i].getParameter('mesh_color').data;
+            expect(color[0]).to.be.closeTo(linear.r, 0.001);
+            expect(color[1]).to.be.closeTo(linear.g, 0.001);
+            expect(color[2]).to.be.closeTo(linear.b, 0.001);
 
-            const opacity = meshes[i].getParameter('material_opacity').data;
+            const opacity = meshes[i].getParameter('mesh_color').data[3];
             expect(opacity).to.be.closeTo(1, 0.001);
         }
     });
 
     it('changes opacity', function () {
+        element.fontAsset = fontAsset.id;
+        element.text = 'test';
         element.opacity = 0.4;
         expect(element.opacity).to.be.closeTo(0.4, 0.001);
 
         const meshes = element._text._model.meshInstances;
+        expect(meshes.length).to.be.greaterThan(0);
         for (let i = 0; i < meshes.length; i++) {
-            const opacity = meshes[i].getParameter('material_opacity').data;
+            const opacity = meshes[i].getParameter('mesh_color').data[3];
             expect(opacity).to.be.closeTo(0.4, 0.001);
         }
     });
 
+
+    it('Preserves independent text tint and opacity when switching markup', function () {
+        element.fontAsset = fontAsset.id;
+        element.text = 'test';
+        const other = new Entity();
+        app.root.addChild(other);
+        other.addComponent('element', { type: 'text', fontAsset: fontAsset.id, text: 'test' });
+        const otherMesh = other.element._text._model.meshInstances[0];
+        const mi = element._text._model.meshInstances[0];
+        expect(mi.material).to.equal(otherMesh.material);
+        element.color = new Color(0.5, 0.25, 0.75);
+        element.opacity = 0.25;
+        const color = mi.getParameter('mesh_color').data;
+        const rgb = Array.from(color).slice(0, 3);
+        element.opacity = 0.75;
+        expect(Array.from(color).slice(0, 3)).to.deep.equal(rgb);
+        expect(color[3]).to.equal(0.75);
+        expect(mi.material.getParameter('mesh_color')).to.be.undefined;
+        expect(mi.getParameter('material_emissive')).to.be.undefined;
+        expect(mi.getParameter('material_opacity')).to.be.undefined;
+        expect(Array.from(otherMesh.getParameter('mesh_color').data)).to.deep.equal([1, 1, 1, 1]);
+
+        element.enableMarkup = true;
+        element.text = '[color="#ff0000"]test[/color]';
+        expect(Array.from(color)).to.deep.equal([1, 1, 1, 0.75]);
+        element.color = new Color(0.25, 0.5, 0.75);
+        element.opacity = 0.5;
+        expect(Array.from(color)).to.deep.equal([1, 1, 1, 0.5]);
+        element.enableMarkup = false;
+        const linear = element.color.clone().linear();
+        expect(color[0]).to.be.closeTo(linear.r, 0.000001);
+        expect(color[1]).to.be.closeTo(linear.g, 0.000001);
+        expect(color[2]).to.be.closeTo(linear.b, 0.000001);
+        expect(color[3]).to.equal(0.5);
+    });
+
+    it('Updates mesh color on every bitmap font atlas mesh', function () {
+        const font = new CanvasFont(app, { fontName: 'Arial', fontSize: 40, width: 128, height: 128 });
+        const text = 'ABCDEFGHIJKLMNOP0123456789';
+        font.createTextures(`${text} `);
+        element.font = font;
+        element.text = text;
+        const meshes = element._text._model.meshInstances;
+        expect(meshes.length).to.be.greaterThan(1);
+        element.color = new Color(0.5, 0.25, 0.75);
+        element.opacity = 0.25;
+        const color = meshes[0].getParameter('mesh_color').data;
+        for (const mi of meshes) {
+            expect(mi.getParameter('mesh_color').data).to.equal(color);
+            expect(mi.getParameter('material_emissive')).to.be.undefined;
+            expect(mi.getParameter('material_opacity')).to.be.undefined;
+        }
+        element.opacity = 0.75;
+        for (const mi of meshes) {
+            expect(mi.getParameter('mesh_color').data[3]).to.equal(0.75);
+        }
+        entity.destroy();
+        font.destroy();
+    });
 
     it('cloned text component is complete', function () {
         const e = new Entity();
@@ -1426,6 +1770,73 @@ describe('TextElement', function () {
         expect(e.element.isVisibleForCamera(camera.camera.camera)).to.be.false;
     });
 
+    it('Masked text is not culled when its wrapped content overflows the element box (#4615)', function () {
+        // screen-space screens enable element culling
+        const screen = new Entity();
+        screen.addComponent('screen', {
+            screenSpace: true
+        });
+        app.root.addChild(screen);
+
+        const camera = new Entity();
+        camera.addComponent('camera');
+        app.root.addChild(camera);
+
+        // masking image element, centered on the screen
+        const mask = new Entity();
+        mask.addComponent('element', {
+            type: 'image',
+            mask: true,
+            anchor: [0.5, 0.5, 0.5, 0.5],
+            pivot: [0.5, 0.5],
+            width: 200,
+            height: 100
+        });
+        screen.addChild(mask);
+
+        // child text whose wrapped content is much taller than its one-line box
+        const e = new Entity();
+        e.addComponent('element', {
+            type: 'text',
+            text: 'the quick brown fox jumps over the lazy dog and keeps on running for a while',
+            fontAsset: fontAsset,
+            anchor: [0.5, 0.5, 0.5, 0.5],
+            pivot: [0.5, 0.5],
+            alignment: [0.5, 0.5],
+            autoWidth: false,
+            autoHeight: false,
+            wrapLines: true,
+            width: 150,
+            height: 20
+        });
+        mask.addChild(e);
+
+        app.update(0.1);
+        app.render();
+
+        // sanity: the text is masked and its rendered content overflows its box vertically
+        expect(e.element.maskedBy).to.equal(mask);
+        const contentHeight = e.element._text.height;
+        expect(contentHeight).to.be.greaterThan(e.element.calculatedHeight);
+
+        // centered over the mask -> visible
+        expect(e.element.isVisibleForCamera(camera.camera.camera)).to.be.true;
+
+        // move the box clear of the mask, but by less than the content overflow, so the wrapped
+        // glyphs still reach into the mask region. The box alone is outside the mask (the old
+        // box-based test culled it here), but the rendered text is not, so it must stay visible.
+        e.setLocalPosition(0, -(55 + contentHeight / 4), 0);
+        app.update(0.1);
+        app.render();
+        expect(e.element.isVisibleForCamera(camera.camera.camera)).to.be.true;
+
+        // move it far enough that even the overflowing content clears the mask -> culled
+        e.setLocalPosition(0, -(contentHeight / 2 + 100), 0);
+        app.update(0.1);
+        app.render();
+        expect(e.element.isVisibleForCamera(camera.camera.camera)).to.be.false;
+    });
+
     it('text is set to translated text when we set the key', function () {
         addText('en-US', 'key', 'translation');
         element.fontAsset = fontAsset;
@@ -1507,7 +1918,7 @@ describe('TextElement', function () {
 
     it('changing the locale changes the font asset', function (done) {
         assets.font2 = new Asset('courier.json', 'font', {
-            url: 'http://localhost:3000/test/assets/fonts/courier.json'
+            url: '/test/assets/fonts/courier.json'
         });
 
         app.assets.add(assets.font2);
@@ -1530,9 +1941,53 @@ describe('TextElement', function () {
         app.i18n.locale = 'fr';
     });
 
+    it('does not render the previous locale text when a cached localized font is swapped in on locale change', function (done) {
+        assets.font2 = new Asset('courier.json', 'font', {
+            url: '/test/assets/fonts/courier.json'
+        });
+
+        app.assets.add(assets.font2);
+        app.assets.load(assets.font2);
+
+        assets.font2.on('load', function () {
+            setTimeout(function () {
+                // both the default and localized fonts are now loaded (cached)
+                fontAsset.addLocalizedAssetId('fr', assets.font2.id);
+                addText('en-US', 'key', 'english');
+                addText('fr', 'key', 'french');
+                element.fontAsset = fontAsset;
+                element.key = 'key';
+
+                // switch to the localized font; cached so it is applied synchronously
+                app.i18n.locale = 'fr';
+                expect(element.text).to.equal('french');
+                expect(element.font).to.equal(assets.font2.resource);
+
+                // record the text rendered on every update during the next locale change
+                const textElement = element._text;
+                const updateText = textElement._updateText;
+                const renderedTexts = [];
+                textElement._updateText = function (text) {
+                    renderedTexts.push(text === undefined ? this._text : text);
+                    return updateText.call(this, text);
+                };
+
+                // switching back swaps in the cached default font; it must never be
+                // rendered with the previous (french) string
+                app.i18n.locale = 'en-US';
+                textElement._updateText = updateText;
+
+                expect(renderedTexts).to.not.include('french');
+                expect(element.text).to.equal('english');
+                expect(element.font).to.equal(assets.font.resource);
+                done();
+            });
+        });
+    });
+
     it('text element that does not use localization uses the default font asset not its localized variant', function (done) {
         assets.font2 = new Asset('courier.json', 'font', {
-            url: 'http://localhost:3000/test/assets/fonts/courier.json'
+            url: '/test/assets/fonts/courier.json'
         });
 
         app.assets.add(assets.font2);
@@ -1554,7 +2009,7 @@ describe('TextElement', function () {
 
     it('if text element is disabled it does not automatically load localizedAssets', function () {
         assets.font2 = new Asset('courier.json', 'font', {
-            url: 'http://localhost:3000/test/assets/fonts/courier.json'
+            url: '/test/assets/fonts/courier.json'
         });
 
         app.assets.add(assets.font2);
@@ -1574,13 +2029,13 @@ describe('TextElement', function () {
     });
 
     it('text element removes i18n event listeners on destroy', function () {
-        expect(app.i18n.hasEvent('set:locale')).to.equal(true);
+        expect(app.i18n.hasEvent('change')).to.equal(true);
         expect(app.i18n.hasEvent('data:add')).to.equal(true);
         expect(app.i18n.hasEvent('data:remove')).to.equal(true);
 
         element.entity.destroy();
 
-        expect(app.i18n.hasEvent('set:locale')).to.equal(false);
+        expect(app.i18n.hasEvent('change')).to.equal(false);
         expect(app.i18n.hasEvent('data:add')).to.equal(false);
         expect(app.i18n.hasEvent('data:remove')).to.equal(false);
     });

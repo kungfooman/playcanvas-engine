@@ -20,16 +20,19 @@ import {
  * catcher. If you don't provide one, the script will create a plane geometry.
  *
  * @example
- * const shadowCatcher = new pc.Entity('ShadowCatcher');
+ * const shadowCatcher = new Entity('ShadowCatcher');
  * shadowCatcher.addComponent('script').create(ShadowCatcher, {
  *     properties: {
- *         scale: new pc.Vec3(50, 50, 50)
+ *         scale: new Vec3(50, 50, 50)
  *         // geometry: geometryEntity // optionally provide a geometry entity
  *     }
  * });
  * app.root.addChild(shadowCatcher);
+ * @category Rendering
  */
 class ShadowCatcher extends Script {
+    static scriptName = 'shadowCatcher';
+
     /**
      * The scale of the shadow catcher.
      * @type {Vec3}
@@ -44,6 +47,22 @@ class ShadowCatcher extends Script {
      * @type {Entity|undefined}
      */
     geometry;
+
+    /**
+     * Draw bucket applied to the shadow catcher's mesh instances. Used to
+     * coarsely control where the catcher sits in the transparent render order
+     * relative to other transparent objects (in `SORTMODE_BACK2FRONT` mode,
+     * higher buckets render first). The default `250` puts the catcher very
+     * early in the transparent pass so its shadow can darken the skybox /
+     * background. Lower it (e.g. to `0`) when the catcher needs to render
+     * AFTER a transparent object that would otherwise overwrite it - for
+     * example a Gaussian Splat ground.
+     *
+     * @attribute
+     * @title Draw Bucket
+     * @type {number}
+     */
+    drawBucket = 250;
 
     /**
      * @type {boolean}
@@ -68,6 +87,11 @@ class ShadowCatcher extends Script {
 
         shadowCatcherMaterial.update();
 
+        // if the entity already has render, use it directly
+        if (!this.geometry && this.entity.render) {
+            this.geometry = this.entity;
+        }
+
         // create shadow catcher geometry if none was provided
         if (!this.geometry) {
             this._geometryCreated = true;
@@ -78,12 +102,12 @@ class ShadowCatcher extends Script {
                 material: shadowCatcherMaterial
             });
         }
-        this.entity.addChild(this.geometry);
+
+        if (this.geometry !== this.entity) {
+            this.entity.addChild(this.geometry);
+        }
 
         this.geometry?.render?.meshInstances.forEach((mi) => {
-
-            // set up the geometry to render very early during the transparent pass, before other transparent objects
-            mi.drawOrder = -1;
 
             // if geometry was provided, set the material
             if (!this._geometryCreated) {
@@ -101,6 +125,11 @@ class ShadowCatcher extends Script {
 
     update() {
         this.geometry?.setLocalScale(this.scale);
+
+        // apply drawBucket every frame so runtime changes take effect
+        this.geometry?.render?.meshInstances.forEach((mi) => {
+            mi.drawBucket = this.drawBucket;
+        });
     }
 }
 

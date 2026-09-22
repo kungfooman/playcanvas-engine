@@ -12,7 +12,7 @@ import { XrMesh } from './xr-mesh.js';
  *
  * ```javascript
  * // start session with plane detection enabled
- * app.xr.start(camera, pc.XRTYPE_AR, pc.XRSPACE_LOCALFLOOR, {
+ * app.xr.start(camera, XRTYPE_AR, XRSPACE_LOCALFLOOR, {
  *     meshDetection: true
  * });
  * ```
@@ -84,10 +84,7 @@ class XrMeshDetection extends EventHandler {
      */
     _supported = platform.browser && !!window.XRMesh;
 
-    /**
-     * @type {boolean}
-     * @private
-     */
+    /** @private */
     _available = false;
 
     /**

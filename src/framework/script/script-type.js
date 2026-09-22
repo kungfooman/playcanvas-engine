@@ -7,8 +7,8 @@ import { Script } from './script.js';
  */
 
 /**
- * This is the legacy format for creating PlayCanvas script returned when calling `pc.createScript()`.
- * You should not use this inherit from this class directly.
+ * This is the legacy format for creating a PlayCanvas script returned when calling `createScript()`.
+ * Do not inherit from this class directly.
  *
  * @deprecated Use {@link Script} instead.
  * @category Script
@@ -24,8 +24,8 @@ class ScriptType extends Script {
      * Create a new ScriptType instance.
      *
      * @param {object} args - The input arguments object.
-     * @param {AppBase} args.app - The {@link AppBase} that is running the script.
-     * @param {Entity} args.entity - The {@link Entity} that the script is attached to.
+     * @param {AppBase} args.app - The AppBase that is running the script.
+     * @param {Entity} args.entity - The Entity that the script is attached to.
      */
     constructor(args) {
         super(args);
@@ -37,7 +37,7 @@ class ScriptType extends Script {
      *
      * @type {ScriptAttributes}
      * @example
-     * var PlayerController = pc.createScript('playerController');
+     * var PlayerController = createScript('playerController');
      *
      * PlayerController.attributes.add('speed', {
      *     type: 'number',
@@ -73,6 +73,7 @@ class ScriptType extends Script {
 
     /**
      * @param {boolean} [force] - Set to true to force initialization of the attributes.
+     * @ignore
      */
     __initializeAttributes(force) {
         if (!force && !this.__attributesRaw) {
@@ -100,7 +101,7 @@ class ScriptType extends Script {
      *
      * @param {object} methods - Object with methods, where key - is name of method, and value - is function.
      * @example
-     * var PlayerController = pc.createScript('playerController');
+     * var PlayerController = createScript('playerController');
      *
      * PlayerController.extend({
      *     initialize: function () {

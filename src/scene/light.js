@@ -21,11 +21,12 @@ import { DepthState } from '../platform/graphics/depth-state.js';
 import { FloatPacking } from '../core/math/float-packing.js';
 
 /**
+ * @import { BoundingBox } from '../core/shape/bounding-box.js'
  * @import { GraphicsDevice } from '../platform/graphics/graphics-device.js'
+ * @import { EventHandle } from '../core/event-handle.js';
  */
 
 /**
- * @import { BindGroup } from '../platform/graphics/bind-group.js'
  * @import { Layer } from './layer.js'
  */
 
@@ -64,7 +65,9 @@ const channelMap = {
 let id = 0;
 
 /**
- * Class storing shadow rendering related private information
+ * Class storing shadow rendering related private information.
+ *
+ * @ignore
  */
 class LightRenderData {
     constructor(camera, face, light) {
@@ -79,7 +82,7 @@ class LightRenderData {
         this.camera = camera;
 
         // camera used to cull / render the shadow map
-        this.shadowCamera = ShadowRenderer.createShadowCamera(light._shadowType, light._type, face);
+        this.shadowCamera = ShadowRenderer.createShadowCamera(light.device, light._shadowType, light._type, face);
 
         // shadow view-projection matrix
         this.shadowMatrix = new Mat4();
@@ -99,21 +102,20 @@ class LightRenderData {
         // - directional: 0 for simple shadows, cascade index for cascaded shadow map
         this.face = face;
 
+        // Face 0 stores the cull request: per camera for directional lights, or with a null camera
+        // for local lights. Retained until the next frame so mesh and splat culling share requests.
+        this.shadowCullRequested = false;
+
+        // On directional face 0, the cascades requested by this camera's scheduled shadow passes.
+        this.shadowCascadeMask = 0;
+
+        // Retain PCSS caster bounds so cached cascades remain part of the depth-fitting union.
+        /** @type {BoundingBox|null} */
+        this.shadowCasterAabb = null;
+        this.shadowCasterAabbValid = false;
+
         // visible shadow casters
         this.visibleCasters = [];
-
-        // an array of view bind groups, single entry is used for shadows
-        /** @type {BindGroup[]} */
-        this.viewBindGroups = [];
-    }
-
-    // releases GPU resources
-    destroy() {
-        this.viewBindGroups.forEach((bg) => {
-            bg.defaultUniformBuffer.destroy();
-            bg.destroy();
-        });
-        this.viewBindGroups.length = 0;
     }
 
     // returns shadow buffer currently attached to the shadow camera
@@ -155,10 +157,17 @@ class Light {
     shadowDepthState = DepthState.DEFAULT.clone();
 
     /**
+     * A multiplier of the light's contribution to the volumetric fog. Only used by omni and spot
+     * lights, when the volumetric fog renders local lights.
+     *
+     * @type {number}
+     */
+    volumetricScattering = 1;
+
+    /**
      * The flags used for clustered lighting. Stored as a bitfield, updated as properties change to
      * avoid those being updated each frame.
      *
-     * @type {number}
      * @ignore
      */
     clusteredFlags = 0;
@@ -180,6 +189,14 @@ class Light {
     clusteredData16 = new Uint16Array(this.clusteredData.buffer);
 
     /**
+     * Event handle for device restored event.
+     *
+     * @type {EventHandle|null}
+     * @private
+     */
+    _evtDeviceRestored = null;
+
+    /**
      * @param {GraphicsDevice} graphicsDevice - The graphics device.
      * @param {boolean} clusteredLighting - True if the clustered lighting is enabled.
      */
@@ -187,6 +204,8 @@ class Light {
         this.device = graphicsDevice;
         this.clusteredLighting = clusteredLighting;
         this.id = id++;
+
+        this._evtDeviceRestored = graphicsDevice.on('devicerestored', this.onDeviceRestored, this);
 
         // Light properties (defaults)
         this._type = LIGHTTYPE_DIRECTIONAL;
@@ -243,15 +262,23 @@ class Light {
 
         this._position = new Vec3(0, 0, 0);
         this._direction = new Vec3(0, 0, 0);
-        this._innerConeAngleCos = Math.cos(this._innerConeAngle * Math.PI / 180);
+        this._innerConeAngleCos = Math.cos(this._innerConeAngle * math.DEG_TO_RAD);
         this._updateOuterAngle(this._outerConeAngle);
 
         this._usePhysicalUnits = undefined;
 
         // Shadow mapping resources
         this._shadowMap = null;
+
+        // Keep a recreated directional map's refresh pending even when the application replaces
+        // shadowUpdateOverrides each frame. Cleared only after all cascades have rendered.
+        this._shadowCascadesInvalidated = false;
         this._shadowRenderParams = [];
         this._shadowCameraParams = [];
+
+        // Per-cascade camera parameters for directional PCSS, packed into four vec4s.
+        // Lazily allocated by the renderer only for directional lights that use PCSS.
+        this._shadowCascadeParams = null;
 
         // Shadow mapping properties
         this.shadowDistance = 40;
@@ -263,6 +290,7 @@ class Light {
         this.shadowUpdateOverrides = null;
         this._isVsm = false;
         this._isPcf = true;
+        this._isPcss = false;
 
         this._softShadowParams = new Float32Array(4);
         this.shadowSamples = 16;
@@ -279,6 +307,7 @@ class Light {
         this.atlasVersion = 0;      // version of the atlas for the allocated slot, allows invalidation when atlas recreates slots
         this.atlasSlotIndex = 0;    // allocated slot index, used for more persistent slot allocation
         this.atlasSlotUpdated = false;  // true if the atlas slot was reassigned this frame (and content needs to be updated)
+        this.cookieRenderVersion = -1;  // cookie texture's uploadVersion last rendered into the atlas, used to re-render dynamic (e.g. video) cookies
 
         this._node = null;
 
@@ -296,19 +325,25 @@ class Light {
     }
 
     destroy() {
+        this._evtDeviceRestored?.off();
+        this._evtDeviceRestored = null;
+
         this._destroyShadowMap();
 
         this.releaseRenderData();
         this._renderData = null;
     }
 
+    onDeviceRestored() {
+        // when context is restored, re-render shadow map
+        if (this.shadowUpdateMode === SHADOWUPDATE_NONE) {
+            this.shadowUpdateMode = SHADOWUPDATE_THISFRAME;
+        }
+    }
+
     releaseRenderData() {
 
         if (this._renderData) {
-            for (let i = 0; i < this._renderData.length; i++) {
-                this._renderData[i].destroy();
-            }
-
             this._renderData.length = 0;
         }
     }
@@ -472,8 +507,8 @@ class Light {
 
         const device = this.device;
 
-        // PCSS requires F16 or F32 render targets
-        if (value === SHADOW_PCSS_32F && !device.textureFloatRenderable && !device.textureHalfFloatRenderable) {
+        // PCSS requires filterable F32 render targets
+        if (value === SHADOW_PCSS_32F && (!device.textureFloatRenderable || !device.textureFloatFilterable)) {
             value = SHADOW_PCF3_32F;
         }
 
@@ -496,8 +531,13 @@ class Light {
         shadowInfo = shadowTypeInfo.get(value);
         this._isVsm = shadowInfo?.vsm ?? false;
         this._isPcf = shadowInfo?.pcf ?? false;
+        this._isPcss = shadowInfo?.pcss ?? false;
 
         this._shadowType = value;
+
+        // hardware depth bias is skipped for PCSS, so refresh it now that _isPcss is known
+        this._updateShadowBias();
+
         this._destroyShadowMap();
         this.updateKey();
     }
@@ -609,7 +649,7 @@ class Light {
         }
 
         this._innerConeAngle = value;
-        this._innerConeAngleCos = Math.cos(value * Math.PI / 180);
+        this._innerConeAngleCos = Math.cos(value * math.DEG_TO_RAD);
         this.updateClusterData(false, true);
 
         if (this._usePhysicalUnits) {
@@ -656,7 +696,7 @@ class Light {
     }
 
     _updateOuterAngle(angle) {
-        const radAngle = angle * Math.PI / 180;
+        const radAngle = angle * math.DEG_TO_RAD;
         this._outerConeAngleCos = Math.cos(radAngle);
         this._outerConeAngleSin = Math.sin(radAngle);
         this.updateClusterData(false, true);
@@ -812,6 +852,9 @@ class Light {
         this.releaseRenderData();
 
         if (this._shadowMap) {
+            if (this._type === LIGHTTYPE_DIRECTIONAL) {
+                this._shadowCascadesInvalidated = true;
+            }
             if (!this._shadowMap.cached) {
                 this._shadowMap.destroy();
             }
@@ -904,6 +947,9 @@ class Light {
         clone.shadowBlockerSamples = this.shadowBlockerSamples;
         clone.penumbraSize = this.penumbraSize;
         clone.penumbraFalloff = this.penumbraFalloff;
+
+        // volumetric properties
+        clone.volumetricScattering = this.volumetricScattering;
 
         // Cookies properties
         // clone.cookie = this._cookie;
@@ -1002,7 +1048,7 @@ class Light {
             sphere.center.add2(node.getPosition(), tmpVec);
 
         } else if (this._type === LIGHTTYPE_OMNI) {
-            sphere.center = this._node.getPosition();
+            sphere.center.copy(this._node.getPosition());
             sphere.radius = this.attenuationEnd;
         }
     }
@@ -1027,7 +1073,13 @@ class Light {
     }
 
     _updateShadowBias() {
-        if (this._type === LIGHTTYPE_OMNI && !this.clusteredLighting) {
+        // No hardware depth bias (polygon offset) is applied for:
+        // - non-clustered omni lights (they store distance, not depth), or
+        // - PCSS shadows of any light type. PCSS stores depth in a color buffer and applies its
+        //   bias in the shader, so the hardware polygon offset is a no-op on WebGL but is applied
+        //   inconsistently on WebGPU (different shadow depth-buffer format), which incorrectly
+        //   removed valid self-shadows. Hardware bias is only meaningful for hardware-compare PCF.
+        if ((this._type === LIGHTTYPE_OMNI && !this.clusteredLighting) || this._isPcss) {
             this.shadowDepthState.depthBias = 0;
             this.shadowDepthState.depthBiasSlope = 0;
         } else {
@@ -1082,7 +1134,7 @@ class Light {
     }
 
     /**
-     * Updates a integer key for the light. The key is used to identify all shader related features
+     * Updates an integer key for the light. The key is used to identify all shader related features
      * of the light, and so needs to have all properties that modify the generated shader encoded.
      * Properties without an effect on the shader (color, shadow intensity) should not be encoded.
      */
@@ -1116,7 +1168,7 @@ class Light {
                (chanId[this._cookieChannel.charAt(0)]     << 18) |
                ((this._cookieTransform ? 1 : 0)           << 12) |
                ((this._shape)                             << 10) |
-               ((this.numCascades > 0 ? 1 : 0)            <<  9) |
+               ((this.numCascades > 1 ? 1 : 0)            <<  9) |
                ((this._cascadeBlend > 0 ? 1 : 0)          <<  8) |
                ((this.affectSpecularity ? 1 : 0)          <<  7) |
                ((this.mask)                               <<  6) |
@@ -1175,10 +1227,35 @@ class Light {
         }
 
         if (updateAngles) {
-            clusteredData16[4] = float2Half(this._innerConeAngleCos);
-            clusteredData16[5] = float2Half(this._outerConeAngleCos);
+            // To store cone angles with full precision in half-floats, we use a hybrid encoding.
+            // For small angles, cos(angle) is close to 1.0, where half-float precision is low.
+            // For these, we store 1.0 - cos(angle) (versine), which is close to 0.0 and has high precision.
+            // For larger angles, we store cos(angle) directly. Two flag bits indicate the format.
+            const cosThreshold = 0.5;
+            let flags = 0;
+
+            // Shrink angles slightly (~1%) to prevent light leaking outside shadow boundaries
+            const angleShrinkFactor = 0.99;
+            let innerCos = Math.cos(this._innerConeAngle * angleShrinkFactor * math.DEG_TO_RAD);
+            if (innerCos > cosThreshold) {
+                innerCos = 1.0 - innerCos;
+                flags |= 1; // Use bit 0 for inner angle: 1 = versine, 0 = cosine
+            }
+
+            let outerCos = Math.cos(this._outerConeAngle * angleShrinkFactor * math.DEG_TO_RAD);
+            if (outerCos > cosThreshold) {
+                outerCos = 1.0 - outerCos;
+                flags |= 2; // Use bit 1 for outer angle: 1 = versine, 0 = cosine
+            }
+
+            // Store flags as integer bits
+            clusteredData16[3] = flags;
+
+            // Store encoded inner and outer values
+            clusteredData16[4] = float2Half(innerCos);
+            clusteredData16[5] = float2Half(outerCos);
         }
     }
 }
 
-export { Light, lightTypes };
+export { Light, LightRenderData, lightTypes };

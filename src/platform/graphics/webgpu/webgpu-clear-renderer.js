@@ -2,20 +2,21 @@ import { Debug } from '../../../core/debug.js';
 import { UniformBufferFormat, UniformFormat } from '../uniform-buffer-format.js';
 import { BlendState } from '../blend-state.js';
 import {
-    CULLFACE_NONE,
     PRIMITIVE_TRISTRIP, SHADERLANGUAGE_WGSL,
     UNIFORMTYPE_FLOAT, UNIFORMTYPE_VEC4, BINDGROUP_MESH, CLEARFLAG_COLOR, CLEARFLAG_DEPTH, CLEARFLAG_STENCIL,
-    BINDGROUP_MESH_UB
+    BINDGROUP_MESH_UB, BINDGROUP_MATERIAL
 } from '../constants.js';
 import { Shader } from '../shader.js';
 import { DynamicBindGroup } from '../bind-group.js';
 import { UniformBuffer } from '../uniform-buffer.js';
 import { DebugGraphics } from '../debug-graphics.js';
 import { DepthState } from '../depth-state.js';
+import webgpuClear from '../shader-chunks/frag/webgpu-clear.js';
 
 const primitive = {
     type: PRIMITIVE_TRISTRIP,
     base: 0,
+    baseVertex: 0,
     count: 4,
     indexed: false
 };
@@ -33,42 +34,11 @@ class WebgpuClearRenderer {
     constructor(device) {
 
         // shader that can write out color and depth values
-        const code = `
-
-            struct ub_mesh {
-                color : vec4f,
-                depth: f32
-            }
-
-            @group(2) @binding(0) var<uniform> ubMesh : ub_mesh;
-
-            var<private> pos : array<vec2f, 4> = array<vec2f, 4>(
-                vec2(-1.0, 1.0), vec2(1.0, 1.0),
-                vec2(-1.0, -1.0), vec2(1.0, -1.0)
-            );
-
-            struct VertexOutput {
-                @builtin(position) position : vec4f
-            }
-
-            @vertex
-            fn vertexMain(@builtin(vertex_index) vertexIndex : u32) -> VertexOutput {
-                var output : VertexOutput;
-                output.position = vec4(pos[vertexIndex], ubMesh.depth, 1.0);
-                return output;
-            }
-
-            @fragment
-            fn fragmentMain() -> @location(0) vec4f {
-                return ubMesh.color;
-            }
-        `;
-
         this.shader = new Shader(device, {
             name: 'WebGPUClearRendererShader',
             shaderLanguage: SHADERLANGUAGE_WGSL,
-            vshader: code,
-            fshader: code
+            vshader: webgpuClear,
+            fshader: webgpuClear
         });
 
         // uniforms
@@ -107,26 +77,29 @@ class WebgpuClearRenderer {
             // not using mesh bind group
             device.setBindGroup(BINDGROUP_MESH, device.emptyBindGroup);
 
+            // not using material bind group
+            device.setBindGroup(BINDGROUP_MATERIAL, device.emptyBindGroup);
+
             // setup clear color
+            let blendState;
             if ((flags & CLEARFLAG_COLOR) && (renderTarget.colorBuffer || renderTarget.impl.assignedColorTexture)) {
                 const color = options.color ?? defaultOptions.color;
                 this.colorData.set(color);
-
-                device.setBlendState(BlendState.NOBLEND);
+                blendState = BlendState.NOBLEND;
             } else {
-                device.setBlendState(BlendState.NOWRITE);
+                blendState = BlendState.NOWRITE;
             }
             uniformBuffer.set('color', this.colorData);
 
             // setup depth clear
+            let depthState;
             if ((flags & CLEARFLAG_DEPTH) && renderTarget.depth) {
                 const depth = options.depth ?? defaultOptions.depth;
                 uniformBuffer.set('depth', depth);
-                device.setDepthState(DepthState.WRITEDEPTH);
-
+                depthState = DepthState.WRITEDEPTH;
             } else {
                 uniformBuffer.set('depth', 1);
-                device.setDepthState(DepthState.NODEPTH);
+                depthState = DepthState.NODEPTH;
             }
 
             // setup stencil clear
@@ -136,7 +109,7 @@ class WebgpuClearRenderer {
 
             uniformBuffer.endUpdate();
 
-            device.setCullMode(CULLFACE_NONE);
+            device.setDrawStates(blendState, depthState);
 
             // render 4 vertices without vertex buffer
             device.setShader(this.shader);

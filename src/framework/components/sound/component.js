@@ -1,10 +1,9 @@
 import { Debug } from '../../../core/debug.js';
-import { DISTANCE_LINEAR } from '../../../platform/audio/constants.js';
+import { DISTANCE_LINEAR } from '../../../platform/sound/constants.js';
 import { Component } from '../component.js';
 import { SoundSlot } from './slot.js';
 
 /**
- * @import { Entity } from '../../entity.js'
  * @import { SoundInstance } from '../../../platform/sound/instance.js'
  */
 
@@ -23,7 +22,7 @@ import { SoundSlot } from './slot.js';
  * to an Entity, use {@link Entity#addComponent}:
  *
  * ```javascript
- * const entity = new pc.Entity();
+ * const entity = new Entity();
  * entity.addComponent('sound', {
  *     volume: 0.8,
  *     positional: true
@@ -381,9 +380,10 @@ class SoundComponent extends Component {
     }
 
     /**
-     * Gets a dictionary that contains the {@link SoundSlot}s managed by this SoundComponent.
+     * Gets a dictionary that contains the {@link SoundSlot}s managed by this SoundComponent. Use
+     * addSlot and removeSlot to change slots.
      *
-     * @type {Object<string, SoundSlot>}
+     * @type {Readonly<Record<string, SoundSlot>>}
      */
     get slots() {
         return this._slots;
@@ -433,7 +433,7 @@ class SoundComponent extends Component {
         this._playingBeforeDisable = playingBeforeDisable;
     }
 
-    onRemove() {
+    onBeforeRemove() {
         this.off();
     }
 
@@ -612,7 +612,7 @@ class SoundComponent extends Component {
 
     /**
      * Pauses playback of the slot with the specified name. If the name is undefined then all slots
-     * currently played will be paused. The slots can be resumed by calling {@link SoundComponent#resume}.
+     * currently played will be paused. The slots can be resumed by calling {@link resume}.
      *
      * @param {string} [name] - The name of the slot to pause. Leave undefined to pause everything.
      * @example

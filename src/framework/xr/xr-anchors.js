@@ -25,7 +25,7 @@ import { XrAnchor } from './xr-anchor.js';
  * session with lots of movement.
  *
  * ```javascript
- * app.xr.start(camera, pc.XRTYPE_AR, pc.XRSPACE_LOCALFLOOR, {
+ * app.xr.start(camera, XRTYPE_AR, XRSPACE_LOCALFLOOR, {
  *     anchors: true
  * });
  * ```
@@ -102,16 +102,10 @@ class XrAnchors extends EventHandler {
      */
     _supported = platform.browser && !!window.XRAnchor;
 
-    /**
-     * @type {boolean}
-     * @private
-     */
+    /** @private */
     _available = false;
 
-    /**
-     * @type {boolean}
-     * @private
-     */
+    /** @private */
     _checkingAvailability = false;
 
     /**
@@ -178,7 +172,7 @@ class XrAnchors extends EventHandler {
 
     /** @private */
     _onSessionStart() {
-        const available = this.manager.session.enabledFeatures.indexOf('anchors') !== -1;
+        const available = this.manager.session.enabledFeatures?.indexOf('anchors') >= 0;
         if (!available) return;
         this._available = available;
         this.fire('available');

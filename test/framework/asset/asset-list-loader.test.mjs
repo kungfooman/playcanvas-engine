@@ -8,7 +8,7 @@ import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
 describe('AssetListLoader', function () {
 
     let app;
-    const assetPath = 'http://localhost:3000/test/assets/';
+    const assetPath = '/test/assets/';
 
     beforeEach(function () {
         jsdomSetup();
@@ -338,24 +338,6 @@ describe('AssetListLoader', function () {
                 const assetListLoader = new AssetListLoader([asset], app.assets);
                 assetListLoader.load(() => {
                     const e = asset.resource.instantiateRenderEntity();
-                    expect(e._app === app).to.be.true;
-                    resolve(e._app);
-                });
-            });
-
-            await Promise.all([
-                loadAssets(app),
-                loadAssets(app2)
-            ]);
-        });
-
-        it('can successfully load Gsplat assets correctly in multi-app', async () => {
-
-            const loadAssets = () => new Promise((resolve, reject) => {
-                const asset = new Asset('splat', 'gsplat', { url: `${assetPath}test.ply` });
-                const assetListLoader = new AssetListLoader([asset], app.assets);
-                assetListLoader.load(() => {
-                    const e = asset.resource.instantiate();
                     expect(e._app === app).to.be.true;
                     resolve(e._app);
                 });

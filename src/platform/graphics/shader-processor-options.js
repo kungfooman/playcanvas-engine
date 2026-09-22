@@ -1,7 +1,7 @@
 import { BINDGROUP_VIEW } from './constants.js';
 
 /**
- * @import { BindGroupFormat } from './bind-group-format.js'
+ * @import { BindGroupFormat, BindTextureFormat } from './bind-group-format.js'
  * @import { GraphicsDevice } from './graphics-device.js'
  * @import { UniformBufferFormat } from './uniform-buffer-format.js'
  * @import { VertexFormat } from './vertex-format.js'
@@ -25,15 +25,15 @@ class ShaderProcessorOptions {
     /**
      * Constructs shader processing options, used to process the shader for uniform buffer support.
      *
-     * @param {UniformBufferFormat} [viewUniformFormat] - Format of the uniform buffer.
-     * @param {BindGroupFormat} [viewBindGroupFormat] - Format of the bind group.
+     * @param {UniformBufferFormat} [viewUniformFormat] - Format of the view uniform buffer. The
+     * view bind group contains only this single uniform buffer (no textures), so its layout is
+     * derived from the uniform format alone and no bind group format is required.
      * @param {VertexFormat} [vertexFormat] - Format of the vertex buffer.
      */
-    constructor(viewUniformFormat, viewBindGroupFormat, vertexFormat) {
+    constructor(viewUniformFormat, vertexFormat) {
 
         // construct a sparse array
         this.uniformFormats[BINDGROUP_VIEW] = viewUniformFormat;
-        this.bindGroupFormats[BINDGROUP_VIEW] = viewBindGroupFormat;
 
         this.vertexFormat = vertexFormat;
     }
@@ -45,15 +45,23 @@ class ShaderProcessorOptions {
      * @returns {boolean} - Returns true if the uniform exists, false otherwise.
      */
     hasUniform(name) {
+        return this.getUniformBindGroup(name) >= 0;
+    }
 
+    /**
+     * Get the index of the bind group whose uniform buffer contains the uniform.
+     *
+     * @param {string} name - The name of the uniform.
+     * @returns {number} - The bind group index, or -1 if no uniform buffer contains the uniform.
+     */
+    getUniformBindGroup(name) {
         for (let i = 0; i < this.uniformFormats.length; i++) {
             const uniformFormat = this.uniformFormats[i];
             if (uniformFormat?.get(name)) {
-                return true;
+                return i;
             }
         }
-
-        return false;
+        return -1;
     }
 
     /**
@@ -63,15 +71,27 @@ class ShaderProcessorOptions {
      * @returns {boolean} - Returns true if the texture uniform exists, false otherwise.
      */
     hasTexture(name) {
+        return !!this.getTexture(name);
+    }
+
+    /**
+     * Get the format of the texture, if one of the supplied bind groups contains it.
+     *
+     * @param {string} name - The name of the texture.
+     * @returns {BindTextureFormat|null} - The format of the texture, or null if no supplied bind
+     * group contains it.
+     */
+    getTexture(name) {
 
         for (let i = 0; i < this.bindGroupFormats.length; i++) {
             const groupFormat = this.bindGroupFormats[i];
-            if (groupFormat?.getTexture(name)) {
-                return true;
+            const textureFormat = groupFormat?.getTexture(name);
+            if (textureFormat) {
+                return textureFormat;
             }
         }
 
-        return false;
+        return null;
     }
 
     getVertexElement(semantic) {
@@ -85,13 +105,26 @@ class ShaderProcessorOptions {
      * @returns {string} - Returns the key.
      */
     generateKey(device) {
-        // TODO: Optimize. Uniform and BindGroup formats should have their keys evaluated in their
-        // constructors, and here we should simply concatenate those.
-        let key = JSON.stringify(this.uniformFormats) + JSON.stringify(this.bindGroupFormats);
+        // the formats describe their layout in a key computed once in their constructors, and
+        // the bind group index they are assigned to is part of the emitted declaration
+        let key = '';
+        const { uniformFormats, bindGroupFormats } = this;
+        for (let i = 0; i < uniformFormats.length; i++) {
+            const format = uniformFormats[i];
+            if (format) {
+                key += `|u${i}:${format.key}`;
+            }
+        }
+        for (let i = 0; i < bindGroupFormats.length; i++) {
+            const format = bindGroupFormats[i];
+            if (format) {
+                key += `|b${i}:${format.key}`;
+            }
+        }
 
         // WebGPU shaders are processed per vertex format
         if (device.isWebGPU) {
-            key += this.vertexFormat?.shaderProcessingHashString;
+            key += `|v:${this.vertexFormat?.shaderProcessingHashString}`;
         }
 
         return key;

@@ -156,4 +156,101 @@ describe('ElementComponent', function () {
 
         expect(screen.screen._elements).to.not.include(e.element);
     });
+
+    it('can be reparented after its screen has been destroyed (#1151)', function () {
+        const screen = new Entity();
+        screen.addComponent('screen');
+        app.root.addChild(screen);
+
+        const e = new Entity();
+        e.addComponent('element');
+        screen.addChild(e);
+
+        // detach the element for later reuse, then destroy its screen (e.g. on scene unload)
+        e.reparent(null);
+        screen.destroy();
+
+        // the dangling screen reference should have been cleared
+        expect(e.element.screen).to.equal(null);
+
+        // reparenting the element again should not throw
+        const newParent = new Entity();
+        app.root.addChild(newParent);
+        expect(() => newParent.addChild(e)).to.not.throw();
+    });
+
+    describe('#type', function () {
+
+        it('adds model to layers when type is set to image after entity is in hierarchy', function () {
+            // This tests the fix for: https://github.com/playcanvas/engine/issues/1989
+            // When entity is added to hierarchy before element type is set, the image should still render
+            const e = new Entity();
+            app.root.addChild(e);
+
+            e.addComponent('element');
+            e.element.type = 'image';
+
+            // Verify that the image element's model has been added to the layers
+            const uiLayer = app.scene.layers.getLayerById(LAYERID_UI);
+            expect(uiLayer).to.not.be.null;
+            expect(e.element._image).to.not.be.null;
+            expect(e.element._image._renderable.model).to.not.be.null;
+            expect(e.element._addedModels).to.include(e.element._image._renderable.model);
+        });
+
+        it('adds model to layers when type is set to text after entity is in hierarchy', function () {
+            const e = new Entity();
+            app.root.addChild(e);
+
+            e.addComponent('element');
+            e.element.type = 'text';
+
+            // Verify that the text element's model has been added to the layers
+            expect(e.element._text).to.not.be.null;
+            expect(e.element._text._model).to.not.be.null;
+            expect(e.element._addedModels).to.include(e.element._text._model);
+        });
+
+        it('does not accumulate graph nodes when the type changes (#4333)', function () {
+            const e = new Entity();
+            app.root.addChild(e);
+
+            e.addComponent('element', { type: 'text' });
+            expect(e.children.length).to.equal(1);
+
+            e.element.type = 'image';
+            expect(e.children.length).to.equal(1);
+
+            e.element.type = 'text';
+            expect(e.children.length).to.equal(1);
+
+            e.element.type = 'group';
+            expect(e.children.length).to.equal(0);
+        });
+
+    });
+
+    describe('#onBeforeRemove', function () {
+
+        it('removes the text element graph node from the entity (#4333)', function () {
+            const e = new Entity();
+            app.root.addChild(e);
+
+            e.addComponent('element', { type: 'text' });
+            e.removeComponent('element');
+
+            expect(e.children.length).to.equal(0);
+        });
+
+        it('removes the image element graph node from the entity (#4333)', function () {
+            const e = new Entity();
+            app.root.addChild(e);
+
+            e.addComponent('element', { type: 'image' });
+            e.removeComponent('element');
+
+            expect(e.children.length).to.equal(0);
+        });
+
+    });
 });

@@ -4,10 +4,12 @@ import { platform } from '../../core/platform.js';
 import { Preprocessor } from '../../core/preprocessor.js';
 import { SHADERLANGUAGE_GLSL, SHADERLANGUAGE_WGSL } from './constants.js';
 import { DebugGraphics } from './debug-graphics.js';
-import { ShaderUtils } from './shader-utils.js';
+import { ShaderDefinitionUtils } from './shader-definition-utils.js';
+import halfTypes from './shader-chunks/frag/half-types.js';
 
 /**
  * @import { BindGroupFormat } from './bind-group-format.js'
+ * @import { TRANSFORM_FEEDBACK_INTERLEAVED, TRANSFORM_FEEDBACK_SEPARATE } from './constants.js'
  * @import { GraphicsDevice } from './graphics-device.js'
  * @import { UniformBufferFormat } from './uniform-buffer-format.js'
  */
@@ -53,7 +55,7 @@ class Shader {
     /**
      * Creates a new Shader instance.
      *
-     * Consider {@link createShaderFromCode} as a simpler and more powerful way to create
+     * Consider {@link ShaderUtils.createShader} as a simpler and more powerful way to create
      * a shader.
      *
      * @param {GraphicsDevice} graphicsDevice - The graphics device used to manage this shader.
@@ -63,23 +65,44 @@ class Shader {
      * vertex shader attribute names to semantics SEMANTIC_*. This enables the engine to match
      * vertex buffer data as inputs to the shader. When not specified, rendering without vertex
      * buffer is assumed.
+     * @param {string[]} [definition.feedbackVaryings] - A list of shader output variable
+     * names that will be captured when using transform feedback. This setting is only effective
+     * if the useTransformFeedback property is enabled.
+     * @param {number} [definition.feedbackVaryingsMode] - Specifies how transform feedback varyings
+     * are written into GPU buffers. Use {@link TRANSFORM_FEEDBACK_INTERLEAVED} to pack all captured
+     * varyings into a single buffer, or {@link TRANSFORM_FEEDBACK_SEPARATE} to store each varying
+     * in its own buffer. This setting is only effective when useTransformFeedback property is enabled.
+     * Defaults to {@link TRANSFORM_FEEDBACK_INTERLEAVED}.
      * @param {string} [definition.vshader] - Vertex shader source (GLSL code). Optional when
      * compute shader is specified.
      * @param {string} [definition.fshader] - Fragment shader source (GLSL code). Optional when
      * useTransformFeedback or compute shader is specified.
      * @param {string} [definition.cshader] - Compute shader source (WGSL code). Only supported on
      * WebGPU platform.
+     * @param {string} [definition.computeEntryPoint] - The entry point function name for the compute
+     * shader. Defaults to 'main'.
+     * @param {BindGroupFormat} [definition.computeBindGroupFormat] - The bind group format for
+     * caller-provided compute resources in group 0. Only used on WebGPU.
+     * @param {Object<string, UniformBufferFormat>} [definition.computeUniformBufferFormats] - The
+     * uniform buffer formats keyed by bind group entry name. Requires computeBindGroupFormat.
      * @param {Map<string, string>} [definition.vincludes] - A map containing key-value pairs of
      * include names and their content. These are used for resolving #include directives in the
      * vertex shader source.
      * @param {Map<string, string>} [definition.fincludes] - A map containing key-value pairs
      * of include names and their content. These are used for resolving #include directives in the
      * fragment shader source.
+     * @param {Map<string, string>} [definition.cincludes] - A map containing key-value pairs
+     * of include names and their content. These are used for resolving #include directives in the
+     * compute shader source.
+     * @param {Map<string, string>} [definition.cdefines] - A map containing key-value pairs of
+     * define names and their values. These are used for resolving defines in the compute shader.
      * @param {boolean} [definition.useTransformFeedback] - Specifies that this shader outputs
      * post-VS data to a buffer.
      * @param {string | string[]} [definition.fragmentOutputTypes] - Fragment shader output types,
      * which default to vec4. Passing a string will set the output type for all color attachments.
      * Passing an array will set the output type for each color attachment.
+     * @param {boolean} [definition.useDualSourceBlending] - Whether the fragment shader outputs a
+     * secondary color for dual-source blending. Defaults to false.
      * @param {string} [definition.shaderLanguage] - Specifies the shader language of vertex and
      * fragment shaders. Defaults to {@link SHADERLANGUAGE_GLSL}.
      * @example
@@ -105,17 +128,23 @@ class Shader {
      *
      * const shaderDefinition = {
      *     attributes: {
-     *         aPosition: pc.SEMANTIC_POSITION
+     *         aPosition: SEMANTIC_POSITION
      *     },
      *     vshader,
      *     fshader
      * };
      *
-     * const shader = new pc.Shader(graphicsDevice, shaderDefinition);
+     * const shader = new Shader(graphicsDevice, shaderDefinition);
      */
     constructor(graphicsDevice, definition) {
         this.id = id++;
         this.device = graphicsDevice;
+
+        // shallow copy the definition, as the code below replaces the shader sources with their
+        // pre-processed versions and may add extracted attributes. The object supplied by the
+        // caller must not be modified.
+        definition = { ...definition };
+
         this.definition = definition;
         this.name = definition.name || 'Untitled';
         this.init();
@@ -123,6 +152,31 @@ class Shader {
         if (definition.cshader) {
             Debug.assert(graphicsDevice.supportsCompute, 'Compute shaders are not supported on this device.');
             Debug.assert(!definition.vshader && !definition.fshader, 'Vertex and fragment shaders are not supported when creating a compute shader.');
+
+            // keep reference to unmodified shader in debug mode
+            Debug.call(() => {
+                this.cUnmodified = definition.cshader;
+            });
+
+            // Prepend enables and defines to compute shader source
+            const enablesCode = ShaderDefinitionUtils.getWGSLEnables(graphicsDevice, 'compute');
+            const definesCode = ShaderDefinitionUtils.getDefinesCode(graphicsDevice, definition.cdefines);
+
+            const cshader = enablesCode + definesCode + definition.cshader;
+
+            // Add built-in halfTypesCS include for compute shaders (if not already provided by
+            // user). Note this copies the supplied map, which must not be modified.
+            const cincludes = new Map(definition.cincludes);
+            if (!cincludes.has('halfTypesCS')) {
+                cincludes.set('halfTypesCS', halfTypes);
+            }
+
+            // pre-process compute shader source
+            definition.cshader = Preprocessor.run(cshader, cincludes, {
+                sourceName: `compute shader for ${this.label}`,
+                stripDefines: true
+            });
+
         } else {
             Debug.assert(definition.vshader, 'No vertex shader has been specified when creating a shader.');
             Debug.assert(definition.fshader, 'No fragment shader has been specified when creating a shader.');
@@ -143,7 +197,7 @@ class Shader {
 
             // if no attributes are specified, try to extract the default names after the shader has been pre-processed
             if (definition.shaderLanguage === SHADERLANGUAGE_GLSL) {
-                definition.attributes ??= ShaderUtils.collectAttributes(definition.vshader);
+                definition.attributes ??= ShaderDefinitionUtils.collectAttributes(definition.vshader);
             }
 
             // Strip unused color attachments from fragment shader.
@@ -166,6 +220,9 @@ class Shader {
         }
 
         this.impl = graphicsDevice.createShaderImpl(this);
+
+        // add it to the device list of all shaders
+        graphicsDevice.shaders.push(this);
 
         Debug.trace(TRACEID_SHADER_ALLOC, `Alloc: ${this.label}, stack: ${DebugGraphics.toString()}`, {
             instance: this

@@ -250,8 +250,6 @@ class ElementMouseEvent extends ElementInputEvent {
 
         /**
          * The amount of the wheel movement.
-         *
-         * @type {number}
          */
         this.wheelDelta = 0;
 
@@ -320,7 +318,7 @@ class ElementTouchEvent extends ElementInputEvent {
  */
 class ElementSelectEvent extends ElementInputEvent {
     /**
-     * Create an instance of a ElementSelectEvent.
+     * Create an instance of an ElementSelectEvent.
      *
      * @param {XRInputSourceEvent} event - The XRInputSourceEvent that was originally raised.
      * @param {ElementComponent} element - The
@@ -429,16 +427,17 @@ class ElementInput {
         this._target = domElement;
         this._attached = true;
 
-        const opts = platform.passiveEvents ? { passive: true } : false;
+        /** @type {AddEventListenerOptions} */
+        const options = { passive: true };
         if (this._useMouse) {
-            window.addEventListener('mouseup', this._upHandler, opts);
-            window.addEventListener('mousedown', this._downHandler, opts);
-            window.addEventListener('mousemove', this._moveHandler, opts);
-            window.addEventListener('wheel', this._wheelHandler, opts);
+            window.addEventListener('mouseup', this._upHandler, options);
+            window.addEventListener('mousedown', this._downHandler, options);
+            window.addEventListener('mousemove', this._moveHandler, options);
+            window.addEventListener('wheel', this._wheelHandler, options);
         }
 
         if (this._useTouch && platform.touch) {
-            this._target.addEventListener('touchstart', this._touchstartHandler, opts);
+            this._target.addEventListener('touchstart', this._touchstartHandler, options);
             // Passive is not used for the touchend event because some components need to be
             // able to call preventDefault(). See notes in button/component.js for more details.
             this._target.addEventListener('touchend', this._touchendHandler, false);
@@ -467,16 +466,17 @@ class ElementInput {
         if (!this._attached) return;
         this._attached = false;
 
-        const opts = platform.passiveEvents ? { passive: true } : false;
+        /** @type {AddEventListenerOptions} */
+        const options = { passive: true };
         if (this._useMouse) {
-            window.removeEventListener('mouseup', this._upHandler, opts);
-            window.removeEventListener('mousedown', this._downHandler, opts);
-            window.removeEventListener('mousemove', this._moveHandler, opts);
-            window.removeEventListener('wheel', this._wheelHandler, opts);
+            window.removeEventListener('mouseup', this._upHandler, options);
+            window.removeEventListener('mousedown', this._downHandler, options);
+            window.removeEventListener('mousemove', this._moveHandler, options);
+            window.removeEventListener('wheel', this._wheelHandler, options);
         }
 
         if (this._useTouch) {
-            this._target.removeEventListener('touchstart', this._touchstartHandler, opts);
+            this._target.removeEventListener('touchstart', this._touchstartHandler, options);
             this._target.removeEventListener('touchend', this._touchendHandler, false);
             this._target.removeEventListener('touchmove', this._touchmoveHandler, false);
             this._target.removeEventListener('touchcancel', this._touchcancelHandler, false);
@@ -662,9 +662,9 @@ class ElementInput {
                 const hovered = this._getTargetElementByCoords(cameras[c], coords.x, coords.y);
                 if (hovered === element) {
 
-                    if (!this._clickedEntities[element.entity.getGuid()]) {
+                    if (!this._clickedEntities[element.entity.guid]) {
                         this._fireEvent('click', new ElementTouchEvent(event, element, camera, x, y, touch));
-                        this._clickedEntities[element.entity.getGuid()] = Date.now();
+                        this._clickedEntities[element.entity.guid] = Date.now();
                     }
 
                 }
@@ -761,7 +761,7 @@ class ElementInput {
             // click event
             if (this._pressedElement === this._hoveredElement) {
                 // fire click event if it hasn't been fired already by the touchend handler
-                const guid = this._hoveredElement.entity.getGuid();
+                const guid = this._hoveredElement.entity.guid;
                 // Always fire, if there are no clicked entities
                 let fireClick = !this._clickedEntities;
                 // But if there are, we need to check how long ago touchend added a "click brake"
@@ -1196,6 +1196,17 @@ class ElementInput {
         }
 
         return _accumulatedScale;
+    }
+
+    /**
+     * Gets the mouse wheel value.
+     *
+     * @type {number}
+     * @ignore
+     * @deprecated Use {@link ElementMouseEvent#wheelDelta} instead.
+     */
+    get wheel() {
+        return this.wheelDelta * -2;
     }
 }
 

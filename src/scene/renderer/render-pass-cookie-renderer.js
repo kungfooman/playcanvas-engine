@@ -1,17 +1,17 @@
 import { Debug } from '../../core/debug.js';
 import { Vec4 } from '../../core/math/vec4.js';
 import { Mat4 } from '../../core/math/mat4.js';
-import { CULLFACE_NONE, SEMANTIC_POSITION, SHADERLANGUAGE_GLSL, SHADERLANGUAGE_WGSL } from '../../platform/graphics/constants.js';
+import { SEMANTIC_POSITION } from '../../platform/graphics/constants.js';
 import { DebugGraphics } from '../../platform/graphics/debug-graphics.js';
 import { LIGHTTYPE_DIRECTIONAL, LIGHTTYPE_OMNI } from '../constants.js';
-import { createShaderFromCode } from '../shader-lib/utils.js';
+import { ShaderUtils } from '../shader-lib/shader-utils.js';
 import { LightCamera } from './light-camera.js';
-import { BlendState } from '../../platform/graphics/blend-state.js';
 import { QuadRender } from '../graphics/quad-render.js';
-import { DepthState } from '../../platform/graphics/depth-state.js';
 import { RenderPass } from '../../platform/graphics/render-pass.js';
-import { shaderChunks } from '../shader-lib/chunks/chunks.js';
-import { shaderChunksWGSL } from '../shader-lib/chunks-wgsl/chunks-wgsl.js';
+
+/**
+ * @import { EventHandle } from '../../core/event-handle.js';
+ */
 
 const _viewport = new Vec4();
 
@@ -32,6 +32,16 @@ class RenderPassCookieRenderer extends RenderPass {
 
     _filteredLights = [];
 
+    _forceCopy = false;
+
+    /**
+     * Event handle for device restored event.
+     *
+     * @type {EventHandle|null}
+     * @private
+     */
+    _evtDeviceRestored = null;
+
     constructor(device, cubeSlotsOffsets) {
         super(device);
         this._cubeSlotsOffsets = cubeSlotsOffsets;
@@ -40,6 +50,8 @@ class RenderPassCookieRenderer extends RenderPass {
 
         this.blitTextureId = device.scope.resolve('blitTexture');
         this.invViewProjId = device.scope.resolve('invViewProj');
+
+        this._evtDeviceRestored = device.on('devicerestored', this.onDeviceRestored, this);
     }
 
     destroy() {
@@ -48,6 +60,9 @@ class RenderPassCookieRenderer extends RenderPass {
 
         this._quadRendererCube?.destroy();
         this._quadRendererCube = null;
+
+        this._evtDeviceRestored?.off();
+        this._evtDeviceRestored = null;
     }
 
     static create(renderTarget, cubeSlotsOffsets) {
@@ -61,6 +76,10 @@ class RenderPassCookieRenderer extends RenderPass {
         renderPass.depthStencilOps.clearDepth = false;
 
         return renderPass;
+    }
+
+    onDeviceRestored() {
+        this._forceCopy = true;
     }
 
     update(lights) {
@@ -88,8 +107,13 @@ class RenderPassCookieRenderer extends RenderPass {
                 continue;
             }
 
-            // only render cookie when the slot is reassigned (assuming the cookie texture is static)
-            if (!light.atlasSlotUpdated) {
+            // re-render the cookie if its texture content changed since it was last copied into the
+            // atlas - this handles dynamic cookies such as video or procedurally generated textures
+            const cookieUpdated = light.cookie && light.cookie.uploadVersion !== light.cookieRenderVersion;
+
+            // only render cookie when the slot is reassigned, the texture content changed, or a
+            // forced copy is requested (e.g. after the device was restored)
+            if (!light.atlasSlotUpdated && !cookieUpdated && !this._forceCopy) {
                 continue;
             }
 
@@ -97,12 +121,14 @@ class RenderPassCookieRenderer extends RenderPass {
                 filteredLights.push(light);
             }
         }
+
+        this._forceCopy = false;
     }
 
     initInvViewProjMatrices() {
         if (!_invViewProjMatrices.length) {
             for (let face = 0; face < 6; face++) {
-                const camera = LightCamera.create(null, LIGHTTYPE_OMNI, face);
+                const camera = LightCamera.create(this.device, null, LIGHTTYPE_OMNI, face);
                 const projMat = camera.projectionMatrix;
                 const viewMat = camera.node.getLocalTransform().clone().invert();
                 _invViewProjMatrices[face] = new Mat4().mul2(projMat, viewMat).invert();
@@ -112,12 +138,11 @@ class RenderPassCookieRenderer extends RenderPass {
 
     get quadRenderer2D() {
         if (!this._quadRenderer2D) {
-            const wgsl = this.device.isWebGPU;
-            const chunks = wgsl ? shaderChunksWGSL : shaderChunks;
-            const shader = createShaderFromCode(this.device, chunks.cookieBlitVS, chunks.cookieBlit2DPS, 'cookieRenderer2d', {
-                vertex_position: SEMANTIC_POSITION
-            }, {
-                shaderLanguage: wgsl ? SHADERLANGUAGE_WGSL : SHADERLANGUAGE_GLSL
+            const shader = ShaderUtils.createShader(this.device, {
+                uniqueName: 'cookieRenderer2d',
+                attributes: { vertex_position: SEMANTIC_POSITION },
+                vertexChunk: 'cookieBlitVS',
+                fragmentChunk: 'cookieBlit2DPS'
             });
             this._quadRenderer2D = new QuadRender(shader);
         }
@@ -126,12 +151,11 @@ class RenderPassCookieRenderer extends RenderPass {
 
     get quadRendererCube() {
         if (!this._quadRendererCube) {
-            const wgsl = this.device.isWebGPU;
-            const chunks = wgsl ? shaderChunksWGSL : shaderChunks;
-            const shader = createShaderFromCode(this.device, chunks.cookieBlitVS, chunks.cookieBlitCubePS, 'cookieRendererCube', {
-                vertex_position: SEMANTIC_POSITION
-            }, {
-                shaderLanguage: wgsl ? SHADERLANGUAGE_WGSL : SHADERLANGUAGE_GLSL
+            const shader = ShaderUtils.createShader(this.device, {
+                uniqueName: 'cookieRendererCube',
+                attributes: { vertex_position: SEMANTIC_POSITION },
+                vertexChunk: 'cookieBlitVS',
+                fragmentChunk: 'cookieBlitCubePS'
             });
             this._quadRendererCube = new QuadRender(shader);
         }
@@ -142,10 +166,7 @@ class RenderPassCookieRenderer extends RenderPass {
 
         // render state
         const device = this.device;
-        device.setBlendState(BlendState.NOBLEND);
-        device.setCullMode(CULLFACE_NONE);
-        device.setDepthState(DepthState.NODEPTH);
-        device.setStencilState();
+        device.setDrawStates();
 
         const renderTargetWidth = this.renderTarget.colorBuffer.width;
         const cubeSlotsOffsets = this._cubeSlotsOffsets;
@@ -165,6 +186,9 @@ class RenderPassCookieRenderer extends RenderPass {
 
             // source texture
             this.blitTextureId.setValue(light.cookie);
+
+            // remember the content version we copied, so subsequent changes trigger a re-render
+            light.cookieRenderVersion = light.cookie.uploadVersion;
 
             // render it to a viewport of the target
             for (let face = 0; face < faceCount; face++) {

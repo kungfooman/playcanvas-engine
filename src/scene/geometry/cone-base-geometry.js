@@ -1,12 +1,14 @@
 import { Vec3 } from '../../core/math/vec3.js';
 import { Geometry } from './geometry.js';
 
-const primitiveUv1Padding = 4.0 / 64;
+const primitiveUv1Padding = 8.0 / 64;
 const primitiveUv1PaddingScale = 1.0 - primitiveUv1Padding * 2;
 
 /**
  * Shared superclass of {@link CapsuleGeometry}, {@link ConeGeometry} and {@link CylinderGeometry}.
  * Use those classes instead of this one.
+ *
+ * @category Graphics
  */
 class ConeBaseGeometry extends Geometry {
     constructor(baseRadius, peakRadius, height, heightSegments, capSegments, roundedCaps) {

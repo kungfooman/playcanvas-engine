@@ -1,12 +1,10 @@
 import { Debug } from '../core/debug.js';
-import { SEMANTIC_POSITION, SHADERLANGUAGE_GLSL, SHADERLANGUAGE_WGSL } from '../platform/graphics/constants.js';
+import { SEMANTIC_POSITION } from '../platform/graphics/constants.js';
 import { drawQuadWithShader } from './graphics/quad-render-utils.js';
 import { RenderTarget } from '../platform/graphics/render-target.js';
 import { DebugGraphics } from '../platform/graphics/debug-graphics.js';
-import { createShaderFromCode } from './shader-lib/utils.js';
+import { ShaderUtils } from './shader-lib/shader-utils.js';
 import { BlendState } from '../platform/graphics/blend-state.js';
-import { shaderChunks } from './shader-lib/chunks/chunks.js';
-import { shaderChunksWGSL } from './shader-lib/chunks-wgsl/chunks-wgsl.js';
 
 /**
  * @import { Morph } from './morph.js'
@@ -191,18 +189,17 @@ class MorphInstance {
      */
     _createShader(maxCount) {
 
-        const wgsl = this.device.isWebGPU;
-        const chunks = wgsl ? shaderChunksWGSL : shaderChunks;
-
         const defines = new Map();
         defines.set('{MORPH_TEXTURE_MAX_COUNT}', maxCount);
         if (this.morph.intRenderFormat) defines.set('MORPH_INT', '');
 
         const outputType = this.morph.intRenderFormat ? 'uvec4' : 'vec4';
-        return createShaderFromCode(this.device, chunks.morphVS, chunks.morphPS, 'TextureMorphShader', {
-            vertex_position: SEMANTIC_POSITION
-        }, {
-            shaderLanguage: wgsl ? SHADERLANGUAGE_WGSL : SHADERLANGUAGE_GLSL,
+
+        return ShaderUtils.createShader(this.device, {
+            uniqueName: `TextureMorphShader_${maxCount}-${this.morph.intRenderFormat ? 'int' : 'float'}`,
+            attributes: { vertex_position: SEMANTIC_POSITION },
+            vertexChunk: 'morphVS',
+            fragmentChunk: 'morphPS',
             fragmentDefines: defines,
             fragmentOutputTypes: [outputType]
         });
@@ -222,7 +219,7 @@ class MorphInstance {
         this.morphIndex.setValue(this._shaderMorphIndex);
 
         // render quad with shader
-        drawQuadWithShader(device, renderTarget, this.shader);
+        drawQuadWithShader(device, renderTarget, this.shader, undefined, undefined, 'MorphBlend');
     }
 
     _updateTextureMorph(activeCount) {

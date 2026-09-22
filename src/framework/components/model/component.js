@@ -33,7 +33,7 @@ import { Component } from '../component.js';
  * to an Entity, use {@link Entity#addComponent}:
  *
  * ```javascript
- * const entity = new pc.Entity();
+ * const entity = new Entity();
  * entity.addComponent('model', {
  *     type: 'box'
  * });
@@ -48,6 +48,7 @@ import { Component } from '../component.js';
  * console.log(entity.model.type); // Get the model component's type and print it
  * ```
  *
+ * @hideconstructor
  * @category Graphics
  */
 class ModelComponent extends Component {
@@ -75,16 +76,10 @@ class ModelComponent extends Component {
      */
     _mapping = {};
 
-    /**
-     * @type {boolean}
-     * @private
-     */
+    /** @private */
     _castShadows = true;
 
-    /**
-     * @type {boolean}
-     * @private
-     */
+    /** @private */
     _receiveShadows = true;
 
     /**
@@ -99,28 +94,17 @@ class ModelComponent extends Component {
      */
     _material;
 
-    /**
-     * @type {boolean}
-     * @private
-     */
+    /** @private */
     _castShadowsLightmap = true;
 
-    /**
-     * @type {boolean}
-     * @private
-     */
+    /** @private */
     _lightmapped = false;
 
-    /**
-     * @type {number}
-     * @private
-     */
+    /** @private */
     _lightmapSizeMultiplier = 1;
 
     /**
      * Mark meshes as non-movable (optimization).
-     *
-     * @type {boolean}
      */
     isStatic = false;
 
@@ -130,10 +114,7 @@ class ModelComponent extends Component {
      */
     _layers = [LAYERID_WORLD]; // assign to the default world layer
 
-    /**
-     * @type {number}
-     * @private
-     */
+    /** @private */
     _batchGroupId = -1;
 
     /**
@@ -146,15 +127,8 @@ class ModelComponent extends Component {
 
     _materialEvents = null;
 
-    /**
-     * @type {boolean}
-     * @private
-     */
+    /** @private */
     _clonedModel = false;
-
-    // #if _DEBUG
-    _batchGroup = null;
-    // #endif
 
     /**
      * @type {EventHandle|null}
@@ -206,9 +180,10 @@ class ModelComponent extends Component {
     }
 
     /**
-     * Gets the array of mesh instances contained in the component's model.
+     * Gets the array of mesh instances contained in the component's model. Use the setter to
+     * replace the array; do not mutate the returned array.
      *
-     * @type {MeshInstance[]|null}
+     * @type {ReadonlyArray<MeshInstance>|null}
      */
     get meshInstances() {
         if (!this._model) {
@@ -374,7 +349,7 @@ class ModelComponent extends Component {
     /**
      * Sets the model owned by this component.
      *
-     * @type {Model}
+     * @type {Model|null}
      */
     set model(value) {
         if (this._model === value) {
@@ -448,7 +423,7 @@ class ModelComponent extends Component {
      * Gets the model owned by this component. In this case a model is not set or loaded, this will
      * return null.
      *
-     * @type {Model}
+     * @type {Model|null}
      */
     get model() {
         return this._model;
@@ -631,7 +606,7 @@ class ModelComponent extends Component {
     /**
      * Gets the array of layer IDs ({@link Layer#id}) to which the mesh instances belong.
      *
-     * @type {number[]}
+     * @type {ReadonlyArray<number>}
      */
     get layers() {
         return this._layers;
@@ -801,7 +776,7 @@ class ModelComponent extends Component {
     /**
      * Gets the dictionary that holds material overrides for each mesh instance.
      *
-     * @type {Object<string, number>}
+     * @type {Readonly<Record<string, number>>}
      */
     get mapping() {
         return this._mapping;
@@ -838,14 +813,21 @@ class ModelComponent extends Component {
         }
     }
 
-    onRemove() {
+    onBeforeRemove() {
+        // removing a component does not disable it first, so undo what onEnable set up
+        if (this.enabled && this.entity.enabled) {
+            this.onDisable();
+        }
+
         this.asset = null;
         this.model = null;
         this.materialAsset = null;
         this._unsetMaterialEvents();
 
         this.entity.off('remove', this.onRemoveChild, this);
+        this.entity.off('removehierarchy', this.onRemoveChild, this);
         this.entity.off('insert', this.onInsertChild, this);
+        this.entity.off('inserthierarchy', this.onInsertChild, this);
     }
 
     /**
@@ -855,10 +837,12 @@ class ModelComponent extends Component {
      */
     onLayersChanged(oldComp, newComp) {
         this.addModelToLayers();
-        oldComp.off('add', this.onLayerAdded, this);
-        oldComp.off('remove', this.onLayerRemoved, this);
-        newComp.on('add', this.onLayerAdded, this);
-        newComp.on('remove', this.onLayerRemoved, this);
+
+        // store the new handles, so that onDisable can unsubscribe from the current composition
+        this._evtLayerAdded?.off();
+        this._evtLayerAdded = newComp.on('add', this.onLayerAdded, this);
+        this._evtLayerRemoved?.off();
+        this._evtLayerRemoved = newComp.on('remove', this.onLayerRemoved, this);
     }
 
     /**
@@ -974,7 +958,7 @@ class ModelComponent extends Component {
         }
 
         if (materialAsset.resource) {
-            meshInstance.material = materialAsset.resource;
+            meshInstance.material = /** @type {Material} */ (materialAsset.resource);
 
             this._setMaterialEvent(index, 'remove', materialAsset.id, function () {
                 meshInstance.material = this.system.defaultMaterial;
@@ -1104,8 +1088,8 @@ class ModelComponent extends Component {
     }
 
     /**
-     * Enable rendering of the model if hidden using {@link ModelComponent#hide}. This method sets
-     * all the {@link MeshInstance#visible} property on all mesh instances to true.
+     * Enable rendering of the model if hidden using {@link hide}. This method sets all the
+     * {@link MeshInstance#visible} property on all mesh instances to true.
      */
     show() {
         if (this._model) {
@@ -1162,7 +1146,7 @@ class ModelComponent extends Component {
      * @private
      */
     _onMaterialAssetLoad(asset) {
-        this._setMaterial(asset.resource);
+        this._setMaterial(/** @type {Material} */ (asset.resource));
     }
 
     /**
@@ -1237,7 +1221,7 @@ class ModelComponent extends Component {
      * @private
      */
     _onModelAssetLoad(asset) {
-        this.model = asset.resource.clone();
+        this.model = /** @type {Model} */ (asset.resource).clone();
         this._clonedModel = true;
     }
 
@@ -1288,6 +1272,18 @@ class ModelComponent extends Component {
                 meshInstances[i].material = material;
             }
         }
+    }
+
+    /**
+     * Sets the visibility of the model.
+     *
+     * @param {boolean} visible - True to enable the model.
+     * @ignore
+     * @deprecated Use {@link ModelComponent#enabled} instead.
+     */
+    setVisible(visible) {
+        Debug.deprecated('ModelComponent#setVisible is deprecated. Use ModelComponent#enabled instead.');
+        this.enabled = visible;
     }
 }
 

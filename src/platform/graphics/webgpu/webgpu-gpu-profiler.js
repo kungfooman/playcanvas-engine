@@ -11,11 +11,14 @@ class WebgpuGpuProfiler extends GpuProfiler {
         super();
         this.device = device;
 
+        this.maxCount = 1024;
+
         // gpu timing queries
-        this.timestampQueriesSet = device.supportsTimestampQuery ? new WebgpuQuerySet(device, true, 512) : null;
+        this.timestampQueriesSet = device.supportsTimestampQuery ? new WebgpuQuerySet(device, true, 2 * this.maxCount) : null;
     }
 
     destroy() {
+        this.invalidateTimings();
         this.timestampQueriesSet?.destroy();
         this.timestampQueriesSet = null;
     }
@@ -36,7 +39,10 @@ class WebgpuGpuProfiler extends GpuProfiler {
             // request results
             const renderVersion = this.device.renderVersion;
             this.timestampQueriesSet?.request(this.slotCount, renderVersion).then((results) => {
-                this.report(results.renderVersion, results.timings);
+                // no results are returned when the device is lost
+                if (results) {
+                    this.report(results.renderVersion, results.timings, results.frameTime);
+                }
             });
 
             super.request(renderVersion);

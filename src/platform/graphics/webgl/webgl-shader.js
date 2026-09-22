@@ -2,9 +2,10 @@ import { Debug } from '../../../core/debug.js';
 import { TRACEID_SHADER_COMPILE } from '../../../core/constants.js';
 import { now } from '../../../core/time.js';
 import { WebglShaderInput } from './webgl-shader-input.js';
-import { SHADERTAG_MATERIAL, semanticToLocation } from '../constants.js';
+import { bindGroupNames, TRANSFORM_FEEDBACK_SEPARATE, SHADERTAG_MATERIAL, semanticToLocation } from '../constants.js';
 import { DeviceCache } from '../device-cache.js';
 import { DebugGraphics } from '../debug-graphics.js';
+import { WebglShaderProcessorGLSL } from './webgl-shader-processor-glsl.js';
 
 /**
  * @import { Shader } from '../shader.js'
@@ -58,9 +59,6 @@ class WebglShader {
 
         // kick off linking, as this is non-blocking too
         this.link(shader.device, shader);
-
-        // add it to a device list of all shaders
-        shader.device.shaders.push(shader);
     }
 
     /**
@@ -83,6 +81,10 @@ class WebglShader {
         this.glProgram = null;
         this.glVertexShader = null;
         this.glFragmentShader = null;
+
+        // the GLSL sources actually compiled (post-processing), used for error reporting
+        this._vsource = null;
+        this._fsource = null;
     }
 
     /**
@@ -112,8 +114,28 @@ class WebglShader {
     compile(device, shader) {
 
         const definition = shader.definition;
-        this.glVertexShader = this._compileShaderSource(device, definition.vshader, true);
-        this.glFragmentShader = this._compileShaderSource(device, definition.fshader, false);
+
+        // shaders generated with processing options are run through the WebGL2 shader processor,
+        // which injects the view uniform buffer block (mirrors WebgpuShader's processingOptions gate)
+        let vsource = definition.vshader;
+        let fsource = definition.fshader;
+        if (definition.processingOptions) {
+            const processed = WebglShaderProcessorGLSL.run(device, definition, shader);
+            vsource = processed.vshader;
+            fsource = processed.fshader;
+
+            // keep reference to processed shaders in debug mode
+            Debug.call(() => {
+                this.processed = processed;
+            });
+        }
+
+        // the sources actually compiled - used for error reporting so line numbers match
+        this._vsource = vsource;
+        this._fsource = fsource;
+
+        this.glVertexShader = this._compileShaderSource(device, vsource, true);
+        this.glFragmentShader = this._compileShaderSource(device, fsource, false);
     }
 
     /**
@@ -150,14 +172,26 @@ class WebglShader {
         const definition = shader.definition;
         const attrs = definition.attributes;
         if (definition.useTransformFeedback) {
-            // Collect all "out_" attributes and use them for output
-            const outNames = [];
-            for (const attr in attrs) {
-                if (attrs.hasOwnProperty(attr)) {
-                    outNames.push(`out_${attr}`);
+            let outNames = definition.feedbackVaryings;
+
+            if (!outNames) {
+                outNames = [];
+
+                // Collect all "out_" attributes and use them for output
+                for (const attr in attrs) {
+                    if (attrs.hasOwnProperty(attr)) {
+                        outNames.push(`out_${attr}`);
+                    }
                 }
             }
-            gl.transformFeedbackVaryings(glProgram, outNames, gl.INTERLEAVED_ATTRIBS);
+
+            /** @type {number} */
+            let bufferMode = gl.INTERLEAVED_ATTRIBS;
+            if (definition.feedbackVaryingsMode === TRANSFORM_FEEDBACK_SEPARATE) {
+                bufferMode = gl.SEPARATE_ATTRIBS;
+            }
+
+            gl.transformFeedbackVaryings(glProgram, outNames, bufferMode);
         }
 
         // map all vertex input attributes to fixed locations
@@ -286,12 +320,12 @@ class WebglShader {
         const linkStatus = gl.getProgramParameter(glProgram, gl.LINK_STATUS);
         if (!linkStatus) {
 
-            // Check for compilation errors
-            if (!this._isCompiled(device, shader, this.glVertexShader, definition.vshader, 'vertex')) {
+            // Check for compilation errors (use the actually-compiled sources so line numbers match)
+            if (!this._isCompiled(device, shader, this.glVertexShader, this._vsource, 'vertex')) {
                 return false;
             }
 
-            if (!this._isCompiled(device, shader, this.glFragmentShader, definition.fshader, 'fragment')) {
+            if (!this._isCompiled(device, shader, this.glFragmentShader, this._fsource, 'fragment')) {
                 return false;
             }
 
@@ -339,6 +373,17 @@ class WebglShader {
             const info = gl.getActiveUniform(glProgram, i);
             const location = gl.getUniformLocation(glProgram, info.name);
 
+            // a built-in variables reported as uniforms for which we do not need to provide any data
+            if (_vertexShaderBuiltins.has(info.name)) {
+                continue;
+            }
+
+            // uniforms that are members of a uniform block have no individual location - they are
+            // supplied through a bound uniform buffer, so skip them from the per-uniform commit path
+            if (location === null) {
+                continue;
+            }
+
             const shaderInput = new WebglShaderInput(device, info.name, device.pcUniformType[info.type], location);
 
             if (samplerTypes.has(info.type)) {
@@ -346,6 +391,25 @@ class WebglShader {
             } else {
                 this.uniforms.push(shaderInput);
             }
+        }
+
+        // Link uniform blocks to their binding points. By convention a block is named
+        // 'ub_<bindGroupName>' (e.g. 'ub_view', 'ub_mesh_ub') and is bound to the matching bind
+        // group index, which is used as its GL uniform buffer binding point (see
+        // WebglGraphicsDevice.setBindGroup). A block not following this convention cannot be
+        // matched to a binding point - it is asserted in debug builds and ignored otherwise.
+        const numBlocks = gl.getProgramParameter(glProgram, gl.ACTIVE_UNIFORM_BLOCKS);
+        for (let i = 0; i < numBlocks; i++) {
+            const blockName = gl.getActiveUniformBlockName(glProgram, i);
+            const shortName = blockName.startsWith('ub_') ? blockName.substring(3) : blockName;
+            const bindGroupIndex = bindGroupNames.indexOf(shortName);
+
+            Debug.assert(bindGroupIndex >= 0,
+                `Shader [${shader.label}] declares an unsupported uniform block [${blockName}] - user uniform buffers are not supported.`,
+                shader);
+
+            const bindingPoint = bindGroupIndex >= 0 ? bindGroupIndex : i;
+            gl.uniformBlockBinding(glProgram, i, bindingPoint);
         }
 
         shader.ready = true;

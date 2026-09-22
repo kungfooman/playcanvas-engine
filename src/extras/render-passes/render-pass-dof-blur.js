@@ -1,5 +1,10 @@
 import { Kernel } from '../../core/math/kernel.js';
+import { SEMANTIC_POSITION, SHADERLANGUAGE_GLSL, SHADERLANGUAGE_WGSL } from '../../platform/graphics/constants.js';
 import { RenderPassShaderQuad } from '../../scene/graphics/render-pass-shader-quad.js';
+import glsldofBlurPS from '../../scene/shader-lib/glsl/chunks/render-pass/frag/dofBlur.js';
+import wgsldofBlurPS from '../../scene/shader-lib/wgsl/chunks/render-pass/frag/dofBlur.js';
+import { ShaderChunks } from '../../scene/shader-lib/shader-chunks.js';
+import { ShaderUtils } from '../../scene/shader-lib/shader-utils.js';
 
 /**
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
@@ -23,6 +28,17 @@ class RenderPassDofBlur extends RenderPassShaderQuad {
     _blurRingPoints = 3;
 
     /**
+     * Resolution the blur radius is calibrated against. The blur is applied as a fraction of this
+     * height, making the effect resolution-independent (higher resolution only increases quality,
+     * not blur strength). Applied as a uniform scale on the blur radius, so it can be changed at
+     * runtime without recompiling the shader. Value 540 matches the legacy half-resolution far
+     * texture at a 1080p frame, preserving previously authored blurRadius values.
+     *
+     * @type {number}
+     */
+    referenceHeight = 540;
+
+    /**
      * @param {GraphicsDevice} device - The graphics device.
      * @param {Texture|null} nearTexture - The near texture to blur. Skip near blur if the texture is null.
      * @param {Texture} farTexture - The far texture to blur.
@@ -33,6 +49,10 @@ class RenderPassDofBlur extends RenderPassShaderQuad {
         this.nearTexture = nearTexture;
         this.farTexture = farTexture;
         this.cocTexture = cocTexture;
+
+        // register shader chunks
+        ShaderChunks.get(device, SHADERLANGUAGE_GLSL).set('dofBlurPS', glsldofBlurPS);
+        ShaderChunks.get(device, SHADERLANGUAGE_WGSL).set('dofBlurPS', wgsldofBlurPS);
 
         const { scope } = device;
         this.kernelId = scope.resolve('kernel[0]');
@@ -71,78 +91,19 @@ class RenderPassDofBlur extends RenderPassShaderQuad {
         this.kernel = new Float32Array(Kernel.concentric(this.blurRings, this.blurRingPoints));
         const kernelCount = this.kernel.length >> 1;
         const nearBlur = this.nearTexture !== null;
-        const shaderName = `DofBlurShader-${kernelCount}-${nearBlur ? 'nearBlur' : 'noNearBlur'}`;
 
-        this.shader = this.createQuadShader(shaderName, /* glsl */`
+        const defines = new Map();
+        defines.set('{KERNEL_COUNT}', kernelCount);
+        defines.set('{INV_KERNEL_COUNT}', 1.0 / kernelCount);
+        if (nearBlur) defines.set('NEAR_BLUR', '');
 
-            ${nearBlur ? '#define NEAR_BLUR' : ''}
-
-            #if defined(NEAR_BLUR)
-                uniform sampler2D nearTexture;
-            #endif
-            uniform sampler2D farTexture;
-            uniform sampler2D cocTexture;
-            uniform float blurRadiusNear;
-            uniform float blurRadiusFar;
-            uniform vec2 kernel[${kernelCount}];
-
-            varying vec2 uv0;
-
-            void main()
-            {
-                vec2 coc = texture2D(cocTexture, uv0).rg;
-                float cocFar = coc.r;
-
-                vec3 sum = vec3(0.0, 0.0, 0.0);
-
-                #if defined(NEAR_BLUR)
-                    // near blur
-                    float cocNear = coc.g;
-                    if (cocNear > 0.0001) {
-
-                        ivec2 nearTextureSize = textureSize(nearTexture, 0);
-                        vec2 step = cocNear * blurRadiusNear / vec2(nearTextureSize);
-
-                        for (int i = 0; i < ${kernelCount}; i++) {
-                            vec2 uv = uv0 + step * kernel[i];
-                            vec3 tap = texture2DLod(nearTexture, uv, 0.0).rgb;
-                            sum += tap.rgb;
-                        }
-
-                        sum *= ${1.0 / kernelCount};
-
-                    } else
-                #endif
-                    
-                    if (cocFar > 0.0001) { // far blur
-
-                    ivec2 farTextureSize = textureSize(farTexture, 0);
-                    vec2 step = cocFar * blurRadiusFar / vec2(farTextureSize);
-
-                    float sumCoC = 0.0; 
-                    for (int i = 0; i < ${kernelCount}; i++) {
-                        vec2 uv = uv0 + step * kernel[i];
-                        vec3 tap = texture2DLod(farTexture, uv, 0.0).rgb;
-
-                        // block out sharp objects to avoid leaking to far blur
-                        float cocThis = texture2DLod(cocTexture, uv, 0.0).r;
-                        tap *= cocThis;
-                        sumCoC += cocThis;
-
-                        sum += tap.rgb;
-                    }
-
-                    // average out the sum
-                    if (sumCoC > 0.0)
-                        sum /= sumCoC;
-
-                    // compensate for the fact the farTexture was premultiplied by CoC
-                    sum /= cocFar;
-                }
-
-                pcFragColor0 = vec4(sum, 1.0);
-            }`
-        );
+        this.shader = ShaderUtils.createShader(this.device, {
+            uniqueName: `DofBlurShader-${kernelCount}-${nearBlur ? 'nearBlur' : 'noNearBlur'}`,
+            attributes: { aPosition: SEMANTIC_POSITION },
+            vertexChunk: 'quadVS',
+            fragmentChunk: 'dofBlurPS',
+            fragmentDefines: defines
+        });
     }
 
     execute() {
@@ -157,8 +118,14 @@ class RenderPassDofBlur extends RenderPassShaderQuad {
 
         this.kernelId.setValue(this.kernel);
         this.kernelCountId.setValue(this.kernel.length >> 1);
-        this.blurRadiusNearId.setValue(this.blurRadiusNear);
-        this.blurRadiusFarId.setValue(this.blurRadiusFar);
+
+        // express the blur radius as a fraction of the reference height, so the effect is
+        // resolution-independent (the shader then aspect-corrects it to stay circular in pixels);
+        // guard against an invalid reference height to avoid Infinity/NaN blur radii
+        const referenceHeight = this.referenceHeight > 0 ? this.referenceHeight : 540;
+        const invReferenceHeight = 1 / referenceHeight;
+        this.blurRadiusNearId.setValue(this.blurRadiusNear * invReferenceHeight);
+        this.blurRadiusFarId.setValue(this.blurRadiusFar * invReferenceHeight);
 
         super.execute();
     }

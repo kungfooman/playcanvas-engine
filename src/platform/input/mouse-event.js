@@ -22,34 +22,32 @@ function isMousePointerLocked() {
  * - {@link Mouse.EVENT_MOUSEMOVE}
  * - {@link Mouse.EVENT_MOUSEWHEEL}
  *
- * @category Input
+ * @category Input Devices
  */
 class MouseEvent {
     /**
      * The x coordinate of the mouse pointer relative to the element {@link Mouse} is attached to.
-     *
-     * @type {number}
      */
     x = 0;
 
     /**
      * The y coordinate of the mouse pointer relative to the element {@link Mouse} is attached to.
-     *
-     * @type {number}
      */
     y = 0;
 
     /**
-     * The change in x coordinate since the last mouse event.
-     *
-     * @type {number}
+     * The change in x coordinate since the last mouse movement event. When the pointer is not
+     * locked, this is zero until an unlocked movement establishes a position after creation,
+     * detachment, focus loss, movement outside the target or pointer-locked movement. Under
+     * pointer lock, this uses the browser's relative movement delta.
      */
     dx = 0;
 
     /**
-     * The change in y coordinate since the last mouse event.
-     *
-     * @type {number}
+     * The change in y coordinate since the last mouse movement event. When the pointer is not
+     * locked, this is zero until an unlocked movement establishes a position after creation,
+     * detachment, focus loss, movement outside the target or pointer-locked movement. Under
+     * pointer lock, this uses the browser's relative movement delta.
      */
     dy = 0;
 
@@ -65,10 +63,16 @@ class MouseEvent {
     button = MOUSEBUTTON_NONE;
 
     /**
+     * The pressed state of all mouse buttons at the time this event was fired. A 3-element
+     * array of booleans for left, middle and right buttons respectively.
+     *
+     * @type {boolean[]}
+     */
+    buttons;
+
+    /**
      * A value representing the amount the mouse wheel has moved, only valid for
      * {@link Mouse.EVENT_MOUSEWHEEL} events.
-     *
-     * @type {number}
      */
     wheelDelta = 0;
 
@@ -81,29 +85,21 @@ class MouseEvent {
 
     /**
      * True if the ctrl key was pressed when this event was fired.
-     *
-     * @type {boolean}
      */
     ctrlKey = false;
 
     /**
      * True if the alt key was pressed when this event was fired.
-     *
-     * @type {boolean}
      */
     altKey = false;
 
     /**
      * True if the shift key was pressed when this event was fired.
-     *
-     * @type {boolean}
      */
     shiftKey = false;
 
     /**
      * True if the meta key was pressed when this event was fired.
-     *
-     * @type {boolean}
      */
     metaKey = false;
 
@@ -159,7 +155,7 @@ class MouseEvent {
         if (isMousePointerLocked()) {
             this.dx = event.movementX || event.webkitMovementX || event.mozMovementX || 0;
             this.dy = event.movementY || event.webkitMovementY || event.mozMovementY || 0;
-        } else {
+        } else if (mouse._lastPositionValid) {
             this.dx = this.x - mouse._lastX;
             this.dy = this.y - mouse._lastY;
         }
@@ -177,6 +173,17 @@ class MouseEvent {
         this.metaKey = event.metaKey ?? false;
 
         this.event = event;
+    }
+
+    /**
+     * Gets the mouse wheel value.
+     *
+     * @type {number}
+     * @ignore
+     * @deprecated Use {@link MouseEvent#wheelDelta} instead.
+     */
+    get wheel() {
+        return this.wheelDelta * -2;
     }
 }
 

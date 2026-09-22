@@ -1,11 +1,10 @@
 /**
  * Base class that implements reference counting for objects.
+ *
+ * @category Framework
  */
 class RefCountedObject {
-    /**
-     * @type {number}
-     * @private
-     */
+    /** @private */
     _refCount = 0;
 
     /**

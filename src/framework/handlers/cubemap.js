@@ -11,9 +11,11 @@ import { ResourceHandler } from './handler.js';
  */
 
 /**
- * Resource handler used for loading cubemap {@link Texture} resources.
+ * Resource handler for the `cubemap` asset type. Assembles a cube map {@link Texture} from six
+ * face texture assets, from a prefiltered environment file, or both, and stores the results in
+ * {@link Asset#resources}.
  *
- * @category Graphics
+ * @category Asset
  */
 class CubemapHandler extends ResourceHandler {
     /**
@@ -266,6 +268,13 @@ class CubemapHandler extends ResourceHandler {
 
         // process the texture asset
         const processTexAsset = function (index, texAsset) {
+            // the cubemap can share the resource of a dependent texture asset (the env atlas), in
+            // which case unloading the cubemap destroys that resource while the dependent asset
+            // stays marked as loaded - unload it to force a reload of valid data
+            if (texAsset.loaded && texAsset.resource && !texAsset.resource.device) {
+                texAsset.unload();
+            }
+
             if (texAsset.loaded) {
                 // asset already exists
                 onLoad(index, texAsset);

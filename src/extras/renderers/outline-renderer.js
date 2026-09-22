@@ -3,27 +3,27 @@ import { Entity } from '../../framework/entity.js';
 import { BlendState } from '../../platform/graphics/blend-state.js';
 import {
     ADDRESS_CLAMP_TO_EDGE, BLENDEQUATION_ADD, BLENDMODE_ONE_MINUS_SRC_ALPHA, BLENDMODE_SRC_ALPHA,
-    CULLFACE_NONE,
     FILTER_LINEAR, FILTER_LINEAR_MIPMAP_LINEAR, PIXELFORMAT_SRGBA8,
-    SEMANTIC_POSITION,
-    SHADERLANGUAGE_GLSL,
-    SHADERLANGUAGE_WGSL
+    RENDERTARGET_ORIGIN_BOTTOM,
+    SEMANTIC_POSITION
 } from '../../platform/graphics/constants.js';
-import { DepthState } from '../../platform/graphics/depth-state.js';
 import { RenderTarget } from '../../platform/graphics/render-target.js';
 import { Texture } from '../../platform/graphics/texture.js';
 import { drawQuadWithShader } from '../../scene/graphics/quad-render-utils.js';
 import { QuadRender } from '../../scene/graphics/quad-render.js';
 import { StandardMaterialOptions } from '../../scene/materials/standard-material-options.js';
 import { StandardMaterial } from '../../scene/materials/standard-material.js';
-import { shaderChunksWGSL } from '../../scene/shader-lib/chunks-wgsl/chunks-wgsl.js';
-import { shaderChunks } from '../../scene/shader-lib/chunks/chunks.js';
-import { createShaderFromCode } from '../../scene/shader-lib/utils.js';
+import { ShaderUtils } from '../../scene/shader-lib/shader-utils.js';
 
 /**
  * @import { AppBase } from '../../framework/app-base.js'
  * @import { Layer } from "../../scene/layer.js"
+ * @import { MeshInstance } from '../../scene/mesh-instance.js'
  */
+
+// Whether a render or model component currently has its mesh instances in the scene's layers.
+// Entity#enabled already accounts for the whole ancestor chain.
+const isRendered = component => component.enabled && component.entity.enabled;
 
 // Fragment shader which works on a source image containing objects rendered using a constant color.
 // The shader removes the original object color and outputs outline color only.
@@ -59,6 +59,46 @@ const shaderOutlineExtendPS = /* glsl */ `
         diff = max(diff, length(firstTexel.rgb - pixel.rgb));
 
        gl_FragColor = vec4(texel.rgb, min(diff, 1.0));
+    }
+`;
+
+// WGSL version of the outline extend shader
+const shaderOutlineExtendWGSL = /* wgsl */ `
+
+    varying vUv0: vec2f;
+
+    uniform uOffset: vec2f;
+    uniform uSrcMultiplier: f32;
+    var source: texture_2d<f32>;
+    var sourceSampler: sampler;
+
+    @fragment
+    fn fragmentMain(input: FragmentInput) -> FragmentOutput {
+        var output: FragmentOutput;
+        
+        var pixel: vec4f;
+        var texel = textureSample(source, sourceSampler, input.vUv0);
+        let firstTexel = texel;
+        var diff = texel.a * uniform.uSrcMultiplier;
+
+        pixel = textureSample(source, sourceSampler, input.vUv0 + uniform.uOffset * -2.0);
+        texel = max(texel, pixel);
+        diff = max(diff, length(firstTexel.rgb - pixel.rgb));
+
+        pixel = textureSample(source, sourceSampler, input.vUv0 + uniform.uOffset * -1.0);
+        texel = max(texel, pixel);
+        diff = max(diff, length(firstTexel.rgb - pixel.rgb));
+
+        pixel = textureSample(source, sourceSampler, input.vUv0 + uniform.uOffset * 1.0);
+        texel = max(texel, pixel);
+        diff = max(diff, length(firstTexel.rgb - pixel.rgb));
+
+        pixel = textureSample(source, sourceSampler, input.vUv0 + uniform.uOffset * 2.0);
+        texel = max(texel, pixel);
+        diff = max(diff, length(firstTexel.rgb - pixel.rgb));
+
+        output.color = vec4f(texel.rgb, min(diff, 1.0));
+        return output;
     }
 `;
 
@@ -98,7 +138,7 @@ class OutlineRenderer {
         });
 
         // custom shader pass for the outline camera
-        this.outlineShaderPass = this.outlineCameraEntity.camera.setShaderPass('OutlineShaderPass');
+        this.outlineShaderPass = this.outlineCameraEntity.camera.setShaderPass('pcOutline');
 
         // function called after the camera has rendered the outline objects to the texture
         this.postRender = (cameraComponent) => {
@@ -117,35 +157,29 @@ class OutlineRenderer {
         this.blendState = new BlendState(true, BLENDEQUATION_ADD, BLENDMODE_SRC_ALPHA, BLENDMODE_ONE_MINUS_SRC_ALPHA);
 
         const device = this.app.graphicsDevice;
-        this.shaderExtend = createShaderFromCode(device, shaderChunks.fullscreenQuadVS, shaderOutlineExtendPS, 'OutlineExtendShader');
 
-        this.shaderBlend = device.isWebGPU ?
-            createShaderFromCode(device, shaderChunksWGSL.fullscreenQuadVS, shaderChunksWGSL.outputTex2DPS, 'OutlineBlendShader',
-                { vertex_position: SEMANTIC_POSITION }, { shaderLanguage: SHADERLANGUAGE_WGSL }) :
-            createShaderFromCode(device, shaderChunks.fullscreenQuadVS, shaderChunks.outputTex2DPS, 'OutlineBlendShader',
-                { vertex_position: SEMANTIC_POSITION }, { shaderLanguage: SHADERLANGUAGE_GLSL });
+        this.shaderExtend = ShaderUtils.createShader(device, {
+            uniqueName: 'OutlineExtendShader',
+            attributes: { vertex_position: SEMANTIC_POSITION },
+            vertexChunk: 'fullscreenQuadVS',
+            fragmentGLSL: shaderOutlineExtendPS,
+            fragmentWGSL: shaderOutlineExtendWGSL
+        });
+
+        this.shaderBlend = ShaderUtils.createShader(device, {
+            uniqueName: 'OutlineBlendShader',
+            attributes: { vertex_position: SEMANTIC_POSITION },
+            vertexChunk: 'fullscreenQuadVS',
+            fragmentChunk: 'outputTex2DPS'
+        });
 
         this.quadRenderer = new QuadRender(this.shaderBlend);
-
-        this.whiteTex = new Texture(device, {
-            name: 'OutlineWhiteTexture',
-            width: 1,
-            height: 1,
-            format: PIXELFORMAT_SRGBA8,
-            mipmaps: false
-        });
-        const pixels = this.whiteTex.lock();
-        pixels.set(new Uint8Array([255, 255, 255, 255]));
-        this.whiteTex.unlock();
     }
 
     /**
      * Destroy the outline renderer and its resources.
      */
     destroy() {
-
-        this.whiteTex.destroy();
-        this.whiteTex = null;
 
         this.outlineCameraEntity.destroy();
         this.outlineCameraEntity = null;
@@ -164,28 +198,45 @@ class OutlineRenderer {
         this.quadRenderer = null;
     }
 
-    getMeshInstances(entity, recursive) {
+    /**
+     * Collect the mesh instances of an entity's render and model components.
+     *
+     * @param {Entity} entity - The entity to collect from.
+     * @param {boolean} recursive - Whether to include the entity's descendants.
+     * @param {boolean} [includeDisabled] - Whether to include components that are not rendered.
+     * Defaults to false, which is what an entity being added wants: a disabled component's mesh
+     * instances are removed from the scene's layers, but the outline layer keeps its own list, so
+     * including them would outline objects that are not drawn. Removal passes true, so an entity
+     * disabled after it was added can still be removed.
+     * @returns {MeshInstance[]} The mesh instances.
+     * @ignore
+     */
+    getMeshInstances(entity, recursive, includeDisabled = false) {
         const meshInstances = [];
 
-        const renders = recursive ? entity.findComponents('render') : (entity.render ? [entity.render] : []);
-        renders.forEach((render) => {
-            if (render.meshInstances) {
-                meshInstances.push(...render.meshInstances);
-            }
-        });
+        if (entity) {
+            const renders = recursive ? entity.findComponents('render') : (entity.render ? [entity.render] : []);
+            renders.forEach((render) => {
+                if (render.meshInstances && (includeDisabled || isRendered(render))) {
+                    meshInstances.push(...render.meshInstances);
+                }
+            });
 
-        const models = recursive ? entity.findComponents('model') : (entity.model ? [entity.model] : []);
-        models.forEach((model) => {
-            if (model.meshInstances) {
-                meshInstances.push(...model.meshInstances);
-            }
-        });
+            const models = recursive ? entity.findComponents('model') : (entity.model ? [entity.model] : []);
+            models.forEach((model) => {
+                if (model.meshInstances && (includeDisabled || isRendered(model))) {
+                    meshInstances.push(...model.meshInstances);
+                }
+            });
+        }
 
         return meshInstances;
     }
 
     /**
-     * Add an entity to the outline renderer.
+     * Add an entity to the outline renderer. Render and model components that are not currently
+     * rendered, because they or their entity are disabled, are skipped - this is evaluated when
+     * the entity is added.
      *
      * @param {Entity} entity - The entity to add. All MeshInstance of the entity and its
      * descendants will be added.
@@ -204,7 +255,7 @@ class OutlineRenderer {
 
                     if (options.pass === outlineShaderPass) {
 
-                        // custom shader for the outline shader pass, renders single color meshes using emissive color
+                        // custom shader for the outline shader pass, preserving material opacity
                         const opts = new StandardMaterialOptions();
                         opts.defines = options.defines;
                         opts.opacityMap = options.opacityMap;
@@ -221,17 +272,17 @@ class OutlineRenderer {
                         opts.litOptions.useMorphPosition = options.litOptions.useMorphPosition;
                         opts.litOptions.useMorphNormal = options.litOptions.useMorphNormal;
                         opts.litOptions.useMorphTextureBasedInt = options.litOptions.useMorphTextureBasedInt;
+                        opts.litOptions.opacityFadesSpecular = options.litOptions.opacityFadesSpecular;
                         return opts;
                     }
 
                     return options;
                 };
 
-                // set emissive color override for the outline shader pass only
+                // set the color consumed only by the pcOutline shader variant
                 _tempColor.linear(color);
                 const colArray = new Float32Array([_tempColor.r, _tempColor.g, _tempColor.b]);
-                meshInstance.setParameter('material_emissive', colArray, 1 << this.outlineShaderPass);
-                meshInstance.setParameter('texture_emissiveMap', this.whiteTex, 1 << this.outlineShaderPass);
+                meshInstance.setParameter('pcOutlineColor', colArray);
             }
         });
 
@@ -246,13 +297,15 @@ class OutlineRenderer {
      * Defaults to true.
      */
     removeEntity(entity, recursive = true) {
-        const meshInstances = this.getMeshInstances(entity, recursive);
+        // include disabled components, so an entity disabled after it was added still has its
+        // outline material state cleaned up
+        const meshInstances = this.getMeshInstances(entity, recursive, true);
         this.renderingLayer.removeMeshInstances(meshInstances);
 
         meshInstances.forEach((meshInstance) => {
             if (meshInstance.material instanceof StandardMaterial) {
                 meshInstance.material.onUpdateShader = null;
-                meshInstance.deleteParameter('material_emissive');
+                meshInstance.deleteParameter('pcOutlineColor');
             }
         });
     }
@@ -267,9 +320,7 @@ class OutlineRenderer {
         const device = this.app.graphicsDevice;
         device.scope.resolve('source').setValue(this.rt.colorBuffer);
 
-        device.setDepthState(DepthState.NODEPTH);
-        device.setCullMode(CULLFACE_NONE);
-        device.setBlendState(this.blendState);
+        device.setDrawStates(this.blendState);
         this.quadRenderer.render();
     }
 
@@ -290,7 +341,7 @@ class OutlineRenderer {
         uOffset.setValue(_tempFloatArray);
         uColorBuffer.setValue(rt.colorBuffer);
         uSrcMultiplier.setValue(0.0);
-        drawQuadWithShader(device, tempRt, shaderExtend);
+        drawQuadWithShader(device, tempRt, shaderExtend, undefined, undefined, 'OutlineExpand');
 
         // vertical extend pass
         _tempFloatArray[0] = 0;
@@ -298,7 +349,7 @@ class OutlineRenderer {
         uOffset.setValue(_tempFloatArray);
         uColorBuffer.setValue(tempRt.colorBuffer);
         uSrcMultiplier.setValue(1.0);
-        drawQuadWithShader(device, rt, shaderExtend);
+        drawQuadWithShader(device, rt, shaderExtend, undefined, undefined, 'OutlineExpand');
     }
 
     createRenderTarget(name, width, height, depth) {
@@ -315,11 +366,12 @@ class OutlineRenderer {
             magFilter: FILTER_LINEAR
         });
 
-        // render target
+        // render target - the outline texture is composited using a raw-uv fullscreen quad
+        // written against the WebGL layout, so replicate it on all graphics APIs
         return new RenderTarget({
             colorBuffer: texture,
             depth: depth,
-            flipY: this.app.graphicsDevice.isWebGPU
+            origin: RENDERTARGET_ORIGIN_BOTTOM
         });
     }
 

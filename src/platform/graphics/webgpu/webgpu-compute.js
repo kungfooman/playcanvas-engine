@@ -3,6 +3,9 @@ import { BindGroup } from '../bind-group.js';
 import { DebugGraphics } from '../debug-graphics.js';
 import { UniformBuffer } from '../uniform-buffer.js';
 
+// size of indirect dispatch entry in bytes, 3 x 32bit (x, y, z workgroup counts)
+const _indirectDispatchEntryByteSize = 3 * 4;
+
 /**
  * A WebGPU implementation of the Compute.
  *
@@ -12,8 +15,14 @@ class WebgpuCompute {
     /** @type {UniformBuffer[]} */
     uniformBuffers = [];
 
-    /** @type {BindGroup} */
-    bindGroup = null;
+    /**
+     * Bind groups, indexed by bind group index. A caller-provided format occupies group 0;
+     * auto-reflected resources occupy their own group (0 when no caller format, otherwise 1).
+     * The array is dense (no gaps), as required by WebGPU pipeline layouts.
+     *
+     * @type {BindGroup[]}
+     */
+    bindGroups = [];
 
     constructor(compute) {
         this.compute = compute;
@@ -22,58 +31,121 @@ class WebgpuCompute {
 
         DebugGraphics.pushGpuMarker(device, `Compute:${compute.name}`);
 
-        // create bind group
-        const { computeBindGroupFormat, computeUniformBufferFormats } = shader.impl;
-        Debug.assert(computeBindGroupFormat, 'Compute shader does not have computeBindGroupFormat specified', shader);
+        const {
+            computeBindGroupFormat, computeUniformBufferFormats,
+            computeReflectedBindGroupFormat, computeReflectedUniformBufferFormat,
+            computeReflectedGroupIndex
+        } = shader.impl;
 
-        // this.bindGroup = new BindGroup(device, computeBindGroupFormat, this.uniformBuffer);
-        this.bindGroup = new BindGroup(device, computeBindGroupFormat);
-        DebugHelper.setName(this.bindGroup, `Compute-BindGroup_${this.bindGroup.id}`);
+        // caller uniform buffers are bound into the caller bind group, so the format is required
+        Debug.assert(!computeUniformBufferFormats || computeBindGroupFormat,
+            'Compute shader specifies computeUniformBufferFormats but no computeBindGroupFormat to bind them into', shader);
 
-        if (computeUniformBufferFormats) {
-            for (const name in computeUniformBufferFormats) {
-                if (computeUniformBufferFormats.hasOwnProperty(name)) {
-                    // TODO: investigate implications of using a non-persistent uniform buffer
-                    const ub = new UniformBuffer(device, computeUniformBufferFormats[name], true);
-                    this.uniformBuffers.push(ub);
-                    this.bindGroup.setUniformBuffer(name, ub);
+        // ordered, gapless array of bind group formats (array index === bind group index)
+        const formats = [];
+
+        // group 0: caller-provided resources (if any)
+        if (computeBindGroupFormat) {
+            const bindGroup = new BindGroup(device, computeBindGroupFormat);
+            DebugHelper.setName(bindGroup, `Compute-BindGroup_${bindGroup.id}`);
+
+            if (computeUniformBufferFormats) {
+                for (const name in computeUniformBufferFormats) {
+                    if (computeUniformBufferFormats.hasOwnProperty(name)) {
+                        // TODO: investigate implications of using a non-persistent uniform buffer
+                        const ub = new UniformBuffer(device, computeUniformBufferFormats[name], true);
+                        this.uniformBuffers.push(ub);
+                        bindGroup.setUniformBuffer(name, ub);
+                    }
                 }
             }
+
+            formats[0] = computeBindGroupFormat;
+            this.bindGroups[0] = bindGroup;
+        }
+
+        // auto-reflected resources, at their own bind group (0 when no caller format, otherwise 1)
+        if (computeReflectedBindGroupFormat) {
+            const reflectedBindGroup = new BindGroup(device, computeReflectedBindGroupFormat);
+            DebugHelper.setName(reflectedBindGroup, `Compute-ReflectedBindGroup_${reflectedBindGroup.id}`);
+
+            if (computeReflectedUniformBufferFormat) {
+                // matches the generated 'ub_compute' uniform buffer (see WebgpuShaderProcessorWGSL.runCompute)
+                const ub = new UniformBuffer(device, computeReflectedUniformBufferFormat, true);
+                this.uniformBuffers.push(ub);
+                reflectedBindGroup.setUniformBuffer('ub_compute', ub);
+            }
+
+            formats[computeReflectedGroupIndex] = computeReflectedBindGroupFormat;
+            this.bindGroups[computeReflectedGroupIndex] = reflectedBindGroup;
         }
 
         // pipeline
-        this.pipeline = device.computePipeline.get(shader, computeBindGroupFormat);
+        this.pipeline = device.computePipeline.get(shader, formats);
+        device._computes.add(this);
 
         DebugGraphics.popGpuMarker(device);
     }
 
     destroy() {
+        this.compute.device._computes.delete(this);
+        this.pipeline = null;
 
         this.uniformBuffers.forEach(ub => ub.destroy());
         this.uniformBuffers.length = 0;
 
-        this.bindGroup.destroy();
-        this.bindGroup = null;
+        this.bindGroups.forEach(bindGroup => bindGroup.destroy());
+        this.bindGroups.length = 0;
+    }
+
+    loseContext() {
+        this.pipeline = null;
+    }
+
+    restoreContext() {
+        const { device, shader } = this.compute;
+        this.pipeline = device.computePipeline.get(shader, this.bindGroups.map(bindGroup => bindGroup.format));
     }
 
     updateBindGroup() {
 
         // bind group data
-        const { bindGroup } = this;
-        bindGroup.updateUniformBuffers();
-        bindGroup.update();
+        for (let i = 0; i < this.bindGroups.length; i++) {
+            const bindGroup = this.bindGroups[i];
+            bindGroup.updateUniformBuffers();
+            bindGroup.update();
+        }
     }
 
     dispatch(x, y, z) {
 
-        // bind group
+        // bind groups
         const device = this.compute.device;
-        device.setBindGroup(0, this.bindGroup);
+        for (let i = 0; i < this.bindGroups.length; i++) {
+            device.setBindGroup(i, this.bindGroups[i]);
+        }
 
-        // dispatch
+        // compute pipeline
         const passEncoder = device.passEncoder;
         passEncoder.setPipeline(this.pipeline);
-        passEncoder.dispatchWorkgroups(x, y, z);
+
+        // dispatch
+        const { indirectSlotIndex, indirectBuffer, indirectFrameStamp } = this.compute;
+        if (indirectSlotIndex >= 0) {
+            let gpuBuffer;
+            if (indirectBuffer) {
+                // custom buffer - user owns lifetime, no frame validation
+                gpuBuffer = indirectBuffer.impl.buffer;
+            } else {
+                // built-in buffer - validate frame stamp
+                Debug.assert(indirectFrameStamp === device.renderVersion, 'Indirect dispatch slot must be set each frame using setupIndirectDispatch()');
+                gpuBuffer = device.indirectDispatchBuffer.impl.buffer;
+            }
+            const offset = indirectSlotIndex * _indirectDispatchEntryByteSize;
+            passEncoder.dispatchWorkgroupsIndirect(gpuBuffer, offset);
+        } else {
+            passEncoder.dispatchWorkgroups(x, y, z);
+        }
     }
 }
 

@@ -1,5 +1,30 @@
-// @config WEBGPU_DISABLED
-import * as pc from 'playcanvas';
+import {
+    AppBase,
+    AppOptions,
+    CameraComponentSystem,
+    Color,
+    ContainerHandler,
+    Entity,
+    FILLMODE_FILL_WINDOW,
+    KEY_ESCAPE,
+    Keyboard,
+    LightComponentSystem,
+    Mouse,
+    RESOLUTION_AUTO,
+    RenderComponentSystem,
+    StandardMaterial,
+    TextureHandler,
+    TouchDevice,
+    XRSPACE_LOCALFLOOR,
+    XRTARGETRAY_POINTER,
+    XRTARGETRAY_SCREEN,
+    XRTRACKABLE_MESH,
+    XRTYPE_AR,
+    XrManager,
+    createGraphicsDevice
+} from 'playcanvas';
+
+import { deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -7,7 +32,7 @@ window.focus();
 /**
  * @param {string} msg - The message.
  */
-const message = function (msg) {
+const message = (msg) => {
     /** @type {HTMLDivElement} */
     let el = document.querySelector('.message');
     if (!el) {
@@ -25,14 +50,29 @@ const message = function (msg) {
     el.textContent = msg;
 };
 
-const app = new pc.Application(canvas, {
-    mouse: new pc.Mouse(canvas),
-    touch: new pc.TouchDevice(canvas),
-    keyboard: new pc.Keyboard(window),
-    graphicsDeviceOptions: { alpha: true }
-});
-app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
-app.setCanvasResolution(pc.RESOLUTION_AUTO);
+const gfxOptions = {
+    deviceTypes: [deviceType],
+    alpha: true
+};
+
+const device = await createGraphicsDevice(canvas, gfxOptions);
+device.maxPixelRatio = window.devicePixelRatio;
+
+const createOptions = new AppOptions();
+createOptions.graphicsDevice = device;
+createOptions.mouse = new Mouse(canvas);
+createOptions.touch = new TouchDevice(canvas);
+createOptions.keyboard = new Keyboard(window);
+createOptions.xr = XrManager;
+
+createOptions.componentSystems = [RenderComponentSystem, CameraComponentSystem, LightComponentSystem];
+createOptions.resourceHandlers = [TextureHandler, ContainerHandler];
+
+const app = new AppBase(canvas);
+app.init(createOptions);
+
+app.setCanvasFillMode(FILLMODE_FILL_WINDOW);
+app.setCanvasResolution(RESOLUTION_AUTO);
 
 // Ensure canvas is resized when window changes size
 const resize = () => app.resizeCanvas();
@@ -41,20 +81,17 @@ app.on('destroy', () => {
     window.removeEventListener('resize', resize);
 });
 
-// use device pixel ratio
-app.graphicsDevice.maxPixelRatio = window.devicePixelRatio;
-
 app.start();
 
-// create camera
-const camera = new pc.Entity();
+// Create camera
+const camera = new Entity();
 camera.addComponent('camera', {
-    clearColor: new pc.Color(0, 0, 0, 0),
+    clearColor: new Color(0, 0, 0, 0),
     farClip: 10000
 });
 app.root.addChild(camera);
 
-const l = new pc.Entity();
+const l = new Entity();
 l.addComponent('light', {
     type: 'spot',
     range: 30
@@ -62,23 +99,23 @@ l.addComponent('light', {
 l.translate(0, 10, 0);
 app.root.addChild(l);
 
-const cone = new pc.Entity();
+const cone = new Entity();
 cone.addComponent('render', {
     type: 'cone'
 });
 cone.setLocalScale(0.1, 0.1, 0.1);
 
-const materialStandard = new pc.StandardMaterial();
+const materialStandard = new StandardMaterial();
 
-const materialPersistent = new pc.StandardMaterial();
-materialPersistent.diffuse = new pc.Color(0.5, 1, 0.5);
+const materialPersistent = new StandardMaterial();
+materialPersistent.diffuse = new Color(0.5, 1, 0.5);
 
 const createAnchor = (hitTestResult) => {
     app.xr.anchors.create(hitTestResult, (err, anchor) => {
         if (err) return message('Failed creating Anchor');
         if (!anchor) return message('Anchor has not been created');
 
-        anchor.persist((err, uuid) => {
+        anchor.persist((err, _uuid) => {
             if (err) {
                 message('Anchor failed to persist');
             }
@@ -87,11 +124,11 @@ const createAnchor = (hitTestResult) => {
 };
 
 if (app.xr.supported) {
-    const activate = function () {
-        if (app.xr.isAvailable(pc.XRTYPE_AR)) {
-            camera.camera.startXr(pc.XRTYPE_AR, pc.XRSPACE_LOCALFLOOR, {
+    const activate = () => {
+        if (app.xr.isAvailable(XRTYPE_AR)) {
+            camera.camera.startXr(XRTYPE_AR, XRSPACE_LOCALFLOOR, {
                 anchors: true,
-                callback: function (err) {
+                callback: (err) => {
                     if (err) message(`WebXR Immersive AR failed to start: ${err.message}`);
                 }
             });
@@ -107,10 +144,10 @@ if (app.xr.supported) {
     if (app.touch) {
         app.touch.on('touchend', (evt) => {
             if (!app.xr.active) {
-                // if not in VR, activate
+                // If not in VR, activate
                 activate();
             } else {
-                // otherwise reset camera
+                // Otherwise reset camera
                 camera.camera.endXr();
             }
 
@@ -119,9 +156,9 @@ if (app.xr.supported) {
         });
     }
 
-    // end session by keyboard ESC
+    // End session by keyboard ESC
     app.keyboard.on('keydown', (evt) => {
-        if (evt.key === pc.KEY_ESCAPE && app.xr.active) {
+        if (evt.key === KEY_ESCAPE && app.xr.active) {
             app.xr.end();
         }
     });
@@ -129,7 +166,7 @@ if (app.xr.supported) {
     app.xr.anchors.on('available', () => {
         message('Anchors became available');
 
-        // restore all persistent anchors
+        // Restore all persistent anchors
         if (app.xr.anchors.persistence) {
             const uuids = app.xr.anchors.uuids;
             for (let i = 0; i < uuids.length; i++) {
@@ -144,7 +181,7 @@ if (app.xr.supported) {
     app.xr.on('end', () => {
         message('Immersive AR session has ended');
     });
-    app.xr.on(`available:${pc.XRTYPE_AR}`, (available) => {
+    app.xr.on(`available:${XRTYPE_AR}`, (available) => {
         if (available) {
             if (!app.xr.hitTest.supported) {
                 message('AR Hit Test is not supported');
@@ -160,15 +197,15 @@ if (app.xr.supported) {
         }
     });
 
-    // create hit test sources for all input sources
+    // Create hit test sources for all input sources
     if (app.xr.hitTest.supported && app.xr.anchors.supported) {
         app.xr.input.on('add', (inputSource) => {
             inputSource.hitTestStart({
-                entityTypes: [pc.XRTRACKABLE_MESH],
+                entityTypes: [XRTRACKABLE_MESH],
                 callback: (err, hitTestSource) => {
                     if (err) return;
 
-                    let target = new pc.Entity();
+                    let target = new Entity();
                     target.addComponent('render', {
                         type: 'cylinder'
                     });
@@ -177,8 +214,8 @@ if (app.xr.supported) {
 
                     let lastHitTestResult = null;
 
-                    // persistent input sources
-                    if (inputSource.targetRayMode === pc.XRTARGETRAY_POINTER) {
+                    // Persistent input sources
+                    if (inputSource.targetRayMode === XRTARGETRAY_POINTER) {
                         inputSource.on('select', () => {
                             if (lastHitTestResult) createAnchor(lastHitTestResult);
                         });
@@ -194,8 +231,8 @@ if (app.xr.supported) {
                         target.destroy();
                         target = null;
 
-                        // mobile screen input source
-                        if (inputSource.targetRayMode === pc.XRTARGETRAY_SCREEN && lastHitTestResult) {
+                        // Mobile screen input source
+                        if (inputSource.targetRayMode === XRTARGETRAY_SCREEN && lastHitTestResult) {
                             createAnchor(lastHitTestResult);
                         }
 
@@ -219,7 +256,7 @@ if (app.xr.supported) {
 
                     if (b === 0) continue;
 
-                    // clear all persistent anchors
+                    // Clear all persistent anchors
                     const uuids = app.xr.anchors.uuids;
                     for (let a = 0; a < uuids.length; a++) {
                         app.xr.anchors.forget(uuids[a]);
@@ -230,7 +267,7 @@ if (app.xr.supported) {
         });
     }
 
-    // create entity for anchors
+    // Create entity for anchors
     app.xr.anchors.on('add', (anchor) => {
         let entity = cone.clone();
         app.root.addChild(entity);
@@ -262,7 +299,7 @@ if (app.xr.supported) {
         });
     });
 
-    if (!app.xr.isAvailable(pc.XRTYPE_AR)) {
+    if (!app.xr.isAvailable(XRTYPE_AR)) {
         message('Immersive AR is not available');
     } else if (!app.xr.hitTest.supported) {
         message('AR Hit Test is not supported');
@@ -276,5 +313,3 @@ if (app.xr.supported) {
 } else {
     message('WebXR is not supported');
 }
-
-export { app };

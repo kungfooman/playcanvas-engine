@@ -1,37 +1,29 @@
 /**
- * Represents the raw audio data of playable sound. A Sound is the resource of an audio
+ * Represents the raw audio data of a playable sound. A Sound is the resource of an audio
  * {@link Asset}. An audio asset can be assigned to a {@link SoundSlot} owned by a
  * {@link SoundComponent}.
+ *
+ * The {@link buffer} is the decoded Web Audio `AudioBuffer`, so {@link duration} is known as soon
+ * as the asset has loaded. Playing a sound creates one {@link SoundInstance} per playback, normally
+ * through a slot rather than by constructing the instance directly.
  *
  * @category Sound
  */
 class Sound {
     /**
-     * If the Web Audio API is not supported this contains the audio data.
+     * Contains the decoded audio data.
      *
-     * @type {HTMLAudioElement|undefined}
-     */
-    audio;
-
-    /**
-     * If the Web Audio API is supported this contains the audio data.
-     *
-     * @type {AudioBuffer|undefined}
+     * @type {AudioBuffer}
      */
     buffer;
 
     /**
      * Create a new Sound instance.
      *
-     * @param {HTMLAudioElement|AudioBuffer} resource - If the Web Audio API is supported, pass an
-     * AudioBuffer object, otherwise an Audio object.
+     * @param {AudioBuffer} buffer - The decoded audio data.
      */
-    constructor(resource) {
-        if (resource instanceof Audio) {
-            this.audio = resource;
-        } else {
-            this.buffer = resource;
-        }
+    constructor(buffer) {
+        this.buffer = buffer;
     }
 
     /**
@@ -40,14 +32,7 @@ class Sound {
      * @type {number}
      */
     get duration() {
-        let duration = 0;
-        if (this.buffer) {
-            duration = this.buffer.duration;
-        } else if (this.audio) {
-            duration = this.audio.duration;
-        }
-
-        return duration || 0;
+        return (this.buffer && this.buffer.duration) || 0;
     }
 }
 

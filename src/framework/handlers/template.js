@@ -1,7 +1,13 @@
-import { http } from '../../platform/net/http.js';
+import { TemplateParser } from '../parsers/template.js';
 import { Template } from '../template.js';
 import { ResourceHandler } from './handler.js';
 
+/**
+ * Resource handler for the `template` asset type. Loads template JSON into a {@link Template} that
+ * can be instantiated into the scene with {@link Template#instantiate}.
+ *
+ * @ignore
+ */
 class TemplateHandler extends ResourceHandler {
     /**
      * TextDecoder for decoding binary data.
@@ -13,33 +19,8 @@ class TemplateHandler extends ResourceHandler {
 
     constructor(app) {
         super(app, 'template');
-    }
 
-    load(url, callback) {
-        if (typeof url === 'string') {
-            url = {
-                load: url,
-                original: url
-            };
-        }
-
-        // we need to specify JSON for blob URLs
-        const options = {
-            retry: this.maxRetries > 0,
-            maxRetries: this.maxRetries
-        };
-
-        http.get(url.load, options, (err, response) => {
-            if (err) {
-                callback(`Error requesting template: ${url.original}`);
-            } else {
-                callback(err, response);
-            }
-        });
-    }
-
-    open(url, data) {
-        return new Template(this._app, data);
+        this.addParser(new TemplateParser());
     }
 
     /**
@@ -51,6 +32,18 @@ class TemplateHandler extends ResourceHandler {
     openBinary(data) {
         this.decoder ??= new TextDecoder('utf-8');
         return new Template(this._app, JSON.parse(this.decoder.decode(data)));
+    }
+
+    patch(asset, registry) {
+        // only process if this looks like valid template data
+        if (!asset || !asset.resource || !asset.data || !asset.data.entities) {
+            return;
+        }
+
+        const template = asset.resource;
+
+        // the `data` setter will handle cache invalidation
+        template.data = asset.data;
     }
 }
 

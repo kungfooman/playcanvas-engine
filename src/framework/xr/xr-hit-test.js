@@ -110,16 +110,10 @@ class XrHitTest extends EventHandler {
      */
     _supported = platform.browser && !!(window.XRSession && window.XRSession.prototype.requestHitTestSource);
 
-    /**
-     * @type {boolean}
-     * @private
-     */
+    /** @private */
     _available = false;
 
-    /**
-     * @type {boolean}
-     * @private
-     */
+    /** @private */
     _checkingAvailability = false;
 
     /**
@@ -225,7 +219,7 @@ class XrHitTest extends EventHandler {
      * @example
      * // start hit testing from viewer position facing forwards
      * app.xr.hitTest.start({
-     *     spaceType: pc.XRSPACE_VIEWER,
+     *     spaceType: XRSPACE_VIEWER,
      *     callback: (err, hitTestSource) => {
      *         if (err) return;
      *         hitTestSource.on('result', (position, rotation) => {
@@ -235,9 +229,9 @@ class XrHitTest extends EventHandler {
      * });
      * @example
      * // start hit testing using an arbitrary ray
-     * const ray = new pc.Ray(new pc.Vec3(0, 0, 0), new pc.Vec3(0, -1, 0));
+     * const ray = new Ray(new Vec3(0, 0, 0), new Vec3(0, -1, 0));
      * app.xr.hitTest.start({
-     *     spaceType: pc.XRSPACE_LOCAL,
+     *     spaceType: XRSPACE_LOCAL,
      *     offsetRay: ray,
      *     callback: (err, hitTestSource) => {
      *         // hit test source that will sample real world geometry straight down

@@ -358,8 +358,8 @@ export const SHADOW_PCF1 = 5;  // alias for SHADOW_PCF1_32F for backwards compat
 /**
  * A shadow sampling technique using a 32-bit shadow map that adjusts filter size based on blocker
  * distance, producing realistic, soft shadow edges that vary with the light's occlusion. Note that
- * this technique requires either {@link GraphicsDevice#textureFloatRenderable} or
- * {@link GraphicsDevice#textureHalfFloatRenderable} to be true, and falls back to
+ * this technique requires both {@link GraphicsDevice#textureFloatRenderable} and
+ * {@link GraphicsDevice#textureFloatFilterable} to be true, and falls back to
  * {@link SHADOW_PCF3_32F} otherwise.
  *
  * @category Graphics
@@ -407,6 +407,41 @@ export const shadowTypeInfo = new Map([
     [SHADOW_VSM_32F,     { name: 'VSM_32F', kind: 'VSM', format: PIXELFORMAT_RGBA32F, vsm: true }],
     [SHADOW_PCSS_32F,    { name: 'PCSS_32F', kind: 'PCSS', format: PIXELFORMAT_R32F, pcss: true }]
 ]);
+
+/**
+ * The flag that controls shadow rendering for the 0 cascade
+ *
+ * @category Graphics
+ */
+export const SHADOW_CASCADE_0 = 1;
+
+/**
+ * The flag that controls shadow rendering for the 1 cascade
+ *
+ * @category Graphics
+ */
+export const SHADOW_CASCADE_1 = 2;
+
+/**
+ * The flag that controls shadow rendering for the 2 cascade
+ *
+ * @category Graphics
+ */
+export const SHADOW_CASCADE_2 = 4;
+
+/**
+ * The flag that controls shadow rendering for the 3 cascade
+ *
+ * @category Graphics
+ */
+export const SHADOW_CASCADE_3 = 8;
+
+/**
+ * The flag that controls shadow rendering for the all cascades
+ *
+ * @category Graphics
+ */
+export const SHADOW_CASCADE_ALL = 255;
 
 /**
  * Box filter.
@@ -757,10 +792,41 @@ export const SHADOWUPDATE_THISFRAME = 1;
  */
 export const SHADOWUPDATE_REALTIME = 2;
 
-// flags used on the mask property of the Light, and also on mask property of the MeshInstance
+/**
+ * Light mask bit: on a light, it lights mesh instances that are lit at runtime rather than from a
+ * lightmap; on a mesh instance, it is lit at runtime by such lights. This is the default mask
+ * value of both {@link LightComponent#mask} and {@link MeshInstance#mask}.
+ *
+ * @ignore
+ */
 export const MASK_AFFECT_DYNAMIC = 1;
+
+/**
+ * Light mask bit: on a light, it lights mesh instances that are lightmapped; on a mesh instance,
+ * it receives its lighting from a lightmap and is lit at runtime only by lights carrying this bit.
+ * See {@link LightComponent#mask} and {@link MeshInstance#mask}.
+ *
+ * @ignore
+ */
 export const MASK_AFFECT_LIGHTMAPPED = 2;
+
+/**
+ * Light mask bit: on a light, it is baked into lightmaps by the {@link Lightmapper}; on a mesh
+ * instance, it is a lightmap target that such lights bake into. See {@link LightComponent#mask}
+ * and {@link MeshInstance#mask}.
+ *
+ * @ignore
+ */
 export const MASK_BAKE = 4;
+
+/**
+ * The light mask bits under which a light is applied at runtime. A light carrying none of them
+ * contributes only to lightmaps, reaches no mesh instance while rendering, and so takes no light
+ * slot in a shader. See {@link MASK_AFFECT_DYNAMIC} and {@link MASK_AFFECT_LIGHTMAPPED}.
+ *
+ * @ignore
+ */
+export const MASK_AFFECT_RUNTIME = MASK_AFFECT_DYNAMIC | MASK_AFFECT_LIGHTMAPPED;
 
 /**
  * Render shaded materials using forward rendering.
@@ -776,6 +842,9 @@ export const SHADER_SHADOW = 2;
 
 // shader pass used by the Picker class to render mesh ID
 export const SHADER_PICK = 3;
+
+// shader pass used by the Picker class to render mesh ID and depth
+export const SHADER_DEPTH_PICK = 4;
 
 /**
  * Shader that performs forward rendering.
@@ -1025,11 +1094,32 @@ export const SKYTYPE_DOME = 'dome';
 export const DITHER_NONE = 'none';
 
 /**
+ * Opacity is dithered using a Bayer 2 matrix.
+ *
+ * @category Graphics
+ */
+export const DITHER_BAYER2 = 'bayer2';
+
+/**
+ * Opacity is dithered using a Bayer 4 matrix.
+ *
+ * @category Graphics
+ */
+export const DITHER_BAYER4 = 'bayer4';
+
+/**
  * Opacity is dithered using a Bayer 8 matrix.
  *
  * @category Graphics
  */
 export const DITHER_BAYER8 = 'bayer8';
+
+/**
+ * Opacity is dithered using a Bayer 16 matrix.
+ *
+ * @category Graphics
+ */
+export const DITHER_BAYER16 = 'bayer16';
 
 /**
  * Opacity is dithered using a blue noise.
@@ -1045,9 +1135,34 @@ export const DITHER_BLUENOISE = 'bluenoise';
  */
 export const DITHER_IGNNOISE = 'ignnoise';
 
+/**
+ * Parallax mapping computes the uv offset from a single tap of the height map. This is the cheapest
+ * option, and suits shallow surface detail.
+ *
+ * @category Graphics
+ */
+export const PARALLAX_OFFSET = 'offset';
+
+/**
+ * Parallax occlusion mapping marches the view ray through the height field to find where it meets
+ * the displaced surface. This costs more than {@link PARALLAX_OFFSET}, but represents deeper
+ * displacement without smearing the texture.
+ *
+ * @category Graphics
+ */
+export const PARALLAX_OCCLUSION = 'occlusion';
+
+export const parallaxNames = {
+    [PARALLAX_OFFSET]: 'OFFSET',
+    [PARALLAX_OCCLUSION]: 'OCCLUSION'
+};
+
 export const ditherNames = {
     [DITHER_NONE]: 'NONE',
+    [DITHER_BAYER2]: 'BAYER2',
+    [DITHER_BAYER4]: 'BAYER4',
     [DITHER_BAYER8]: 'BAYER8',
+    [DITHER_BAYER16]: 'BAYER16',
     [DITHER_BLUENOISE]: 'BLUENOISE',
     [DITHER_IGNNOISE]: 'IGNNOISE'
 };
@@ -1081,15 +1196,248 @@ export const EVENT_PRERENDER_LAYER = 'prerender:layer';
 export const EVENT_POSTRENDER_LAYER = 'postrender:layer';
 
 /**
- * Name of event fired before visibility culling is performed for the camera
+ * Name of event fired before visibility culling is performed for the camera.
  *
  * @ignore
  */
 export const EVENT_PRECULL = 'precull';
 
 /**
- * Name of event after before visibility culling is performed for the camera
+ * Name of event after visibility culling is performed for the camera.
  *
  * @ignore
  */
 export const EVENT_POSTCULL = 'postcull';
+
+/**
+ * Name of event after the engine has finished culling all cameras.
+ *
+ * @ignore
+ */
+export const EVENT_CULL_END = 'cull:end';
+
+/** @ignore */
+export const GSPLAT_FORWARD = 1;
+
+/** @ignore */
+export const GSPLAT_SHADOW = 2;
+
+/** @ignore */
+export const SHADOWCAMERA_NAME = 'pcShadowCamera';
+
+/**
+ * Work buffer is updated only when needed (transform, format, LOD changes, new gsplat etc).
+ *
+ * @type {number}
+ * @category Graphics
+ */
+export const WORKBUFFER_UPDATE_AUTO = 0;
+
+/**
+ * Work buffer is updated once on the next frame, then automatically switches to
+ * {@link WORKBUFFER_UPDATE_AUTO}.
+ *
+ * @type {number}
+ * @category Graphics
+ */
+export const WORKBUFFER_UPDATE_ONCE = 1;
+
+/**
+ * Work buffer is updated every frame. Useful for custom shader code via
+ * {@link GSplatComponent#setWorkBufferModifier} that depends on time or animated uniforms.
+ *
+ * @type {number}
+ * @category Graphics
+ */
+export const WORKBUFFER_UPDATE_ALWAYS = 2;
+
+/**
+ * Stream texture is stored at resource level, shared across all component instances.
+ *
+ * @type {number}
+ * @category Graphics
+ */
+export const GSPLAT_STREAM_RESOURCE = 0;
+
+/**
+ * Stream texture is stored per gsplat component instance.
+ *
+ * @type {number}
+ * @category Graphics
+ */
+export const GSPLAT_STREAM_INSTANCE = 1;
+
+/**
+ * Large work buffer data format with full precision. Uses RGBA16F color, float16
+ * rotation and float16 scale. 32 bytes per splat.
+ *
+ * @type {string}
+ * @category Graphics
+ */
+export const GSPLATDATA_LARGE = 'large';
+
+/**
+ * Compact work buffer data format optimized for reduced memory and bandwidth. Uses 11+11+10 bit
+ * RGB color, half-angle quaternion rotation and log-encoded scale. 20 bytes per splat.
+ *
+ * @type {string}
+ * @category Graphics
+ */
+export const GSPLATDATA_COMPACT = 'compact';
+
+/**
+ * Automatically selects the best rendering pipeline for the current platform.
+ *
+ * @type {number}
+ * @category Graphics
+ */
+export const GSPLAT_RENDERER_AUTO = 0;
+
+/**
+ * Rasterization-based rendering with CPU-side sorting.
+ *
+ * @type {number}
+ * @category Graphics
+ */
+export const GSPLAT_RENDERER_RASTER_CPU_SORT = 1;
+
+/**
+ * Rasterization-based rendering with GPU-side culling and sorting. WebGPU only.
+ *
+ * @type {number}
+ * @category Graphics
+ */
+export const GSPLAT_RENDERER_RASTER_GPU_SORT = 2;
+
+// deprecated
+export const GSPLAT_RENDERER_COMPUTE = 3;
+
+/**
+ * LOD selection driven by per-level approximation errors: the splat budget is spent where it
+ * removes the most error per splat, using the manifest's error tables when present and errors
+ * derived from splat counts otherwise. This lifts sparse, low-quality regions - sky, distant
+ * background - that distance alone leaves coarse, but it keeps considerably more source data
+ * resident, so memory use is noticeably higher than with {@link GSPLAT_LODMODE_DISTANCE}.
+ *
+ * @category Graphics
+ */
+export const GSPLAT_LODMODE_ERROR = 'error';
+
+/**
+ * LOD selection ordered by camera distance alone: detail steps down in concentric distance bands
+ * around the camera, with the band edges adapting to the splat budget. Any error metadata in the
+ * asset is ignored. Uses the least memory of the two modes, so prefer it on memory-constrained
+ * devices. The default.
+ *
+ * @category Graphics
+ */
+export const GSPLAT_LODMODE_DISTANCE = 'distance';
+
+/**
+ * No debug rendering for Gaussian splats. Normal rendering mode.
+ *
+ * @type {number}
+ * @category Graphics
+ */
+export const GSPLAT_DEBUG_NONE = 0;
+
+/**
+ * Debug rendering that colorizes Gaussian splats by their selected LOD level.
+ *
+ * @type {number}
+ * @category Graphics
+ */
+export const GSPLAT_DEBUG_LOD = 1;
+
+/**
+ * Debug rendering that assigns a random color per spherical harmonics update pass,
+ * visualizing when SH color updates occur.
+ *
+ * @type {number}
+ * @category Graphics
+ */
+export const GSPLAT_DEBUG_SH_UPDATE = 2;
+
+// deprecated
+export const GSPLAT_DEBUG_HEATMAP = 3;
+
+/**
+ * Debug rendering that draws world-space AABBs for each GSplat, colorized by LOD.
+ *
+ * @type {number}
+ * @category Graphics
+ */
+export const GSPLAT_DEBUG_AABBS = 4;
+
+/**
+ * Debug rendering that draws world-space AABBs for each octree node of streamed GSplats,
+ * colorized by the currently selected LOD.
+ *
+ * @type {number}
+ * @category Graphics
+ */
+export const GSPLAT_DEBUG_NODE_AABBS = 5;
+
+/**
+ * Automatically selects the best radix sort backend for the current WebGPU device:
+ * OneSweep on supported hardware (NVIDIA), the portable backend elsewhere. See
+ * `ComputeRadixSort`.
+ *
+ * @type {number}
+ * @ignore
+ */
+export const RADIX_SORT_AUTO = 0;
+
+/**
+ * Portable radix sort backend. Runs on every WebGPU device (no subgroup
+ * intrinsics required) and is chosen by {@link RADIX_SORT_AUTO} when no
+ * faster hardware-specific backend is available. See `ComputeRadixSort`.
+ *
+ * @type {number}
+ * @ignore
+ */
+export const RADIX_SORT_PORTABLE = 1;
+
+/**
+ * Single-sweep 8-bit radix sort (OneSweep). Requires subgroup support, 32-lane
+ * subgroups, and forward-thread-progress guarantees — currently enabled only on
+ * NVIDIA. See `ComputeRadixSort`.
+ *
+ * @type {number}
+ * @ignore
+ */
+export const RADIX_SORT_ONESWEEP = 2;
+
+/**
+ * The name of the scene depth texture - a scene texture storing the linear depth of the scene,
+ * rendered by the scene pass alongside the scene color. See
+ * {@link CameraShaderParams#sceneTextures}.
+ *
+ * @type {string}
+ * @ignore
+ */
+export const SCENETEXTURE_DEPTH = 'depth';
+
+/**
+ * The uniform each scene texture is published under by the render pass which rendered it. Note that
+ * the depth uses the same uniform as the depth prepass, as those are two producers of the same thing,
+ * and the consumers sample whichever of them ran later in the frame.
+ *
+ * @type {Object<string, string>}
+ * @ignore
+ */
+export const sceneTextureUniformNames = {
+    [SCENETEXTURE_DEPTH]: 'uSceneDepthMap'
+};
+
+/**
+ * The uniforms a mesh instance publishes its own lightmaps under, the color lightmap first and the
+ * directional one second, matching the order of the lightmapper's bake passes. The color one is
+ * deliberately not `texture_lightMap`, the uniform of a lightmap assigned to a material, so that a
+ * mesh instance keeping a lightmap of its own leaves the material's lightmap alone. A mesh instance
+ * lightmap takes priority when both are present.
+ *
+ * @type {string[]}
+ * @ignore
+ */
+export const instanceLightmapUniformNames = ['instance_lightMap', 'texture_dirLightMap'];

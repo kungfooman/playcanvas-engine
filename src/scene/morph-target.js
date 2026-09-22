@@ -11,8 +11,6 @@ import { BoundingBox } from '../core/shape/bounding-box.js';
 class MorphTarget {
     /**
      * A used flag. A morph target can be used / owned by the Morph class only one time.
-     *
-     * @type {boolean}
      */
     used = false;
 
@@ -20,9 +18,9 @@ class MorphTarget {
      * Create a new MorphTarget instance.
      *
      * @param {object} options - Object for passing optional arguments.
-     * @param {ArrayBuffer|Float32Array} options.deltaPositions - An array of 3-dimensional vertex position
+     * @param {ArrayLike<number>} options.deltaPositions - An array of 3-dimensional vertex position
      * offsets.
-     * @param {ArrayBuffer} [options.deltaNormals] - An array of 3-dimensional vertex normal
+     * @param {ArrayLike<number>} [options.deltaNormals] - An array of 3-dimensional vertex normal
      * offsets.
      * @param {string} [options.name] - Name.
      * @param {BoundingBox} [options.aabb] - Bounding box. Will be automatically generated, if

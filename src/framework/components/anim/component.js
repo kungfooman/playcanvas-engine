@@ -13,8 +13,40 @@ import {
 import { AnimTrack } from '../../anim/evaluator/anim-track.js';
 
 /**
- * The AnimComponent allows an {@link Entity} to playback animations on models and entity
- * properties.
+ * The AnimComponent enables an {@link Entity} to play back animations on models and entity
+ * properties. Animations are driven by animation state graphs, which can be authored in the
+ * PlayCanvas Editor or constructed programmatically, and support blending between multiple
+ * layers and clips.
+ *
+ * You should never need to use the AnimComponent constructor directly. To add an AnimComponent
+ * to an {@link Entity}, use {@link Entity#addComponent}:
+ *
+ * ```javascript
+ * const entity = new Entity();
+ * entity.addComponent('anim', {
+ *     activate: true,
+ *     speed: 1
+ * });
+ * ```
+ *
+ * Once the AnimComponent is added to the entity, you can access it via the {@link Entity#anim}
+ * property:
+ *
+ * ```javascript
+ * entity.anim.speed = 2; // Play animations at double speed
+ *
+ * console.log(entity.anim.speed); // Get the playback speed and print it
+ * ```
+ *
+ * Relevant Engine API examples:
+ *
+ * - [1D Blend Trees](https://playcanvas.github.io/#/animation/blend-trees-1d)
+ * - [2D Cartesian Blend Trees](https://playcanvas.github.io/#/animation/blend-trees-2d-cartesian)
+ * - [2D Directional Blend Trees](https://playcanvas.github.io/#/animation/blend-trees-2d-directional)
+ * - [Animation Events](https://playcanvas.github.io/#/animation/events)
+ * - [Component Properties](https://playcanvas.github.io/#/animation/component-properties)
+ * - [Layer Masks](https://playcanvas.github.io/#/animation/layer-masks)
+ * - [Locomotion](https://playcanvas.github.io/#/animation/locomotion)
  *
  * @hideconstructor
  * @category Animation
@@ -90,7 +122,7 @@ class AnimComponent extends Component {
         }
 
         if (_asset.resource) {
-            this._stateGraph = _asset.resource;
+            this._stateGraph = /** @type {any} */ (_asset.resource);
             this.loadStateGraph(this._stateGraph);
             _asset.on('change', this._onStateGraphAssetChangeEvent, this);
         } else {
@@ -229,9 +261,10 @@ class AnimComponent extends Component {
     }
 
     /**
-     * Returns the animation layers available in this anim component.
+     * Returns the animation layers available in this anim component. Use addLayer or loadStateGraph
+     * to change layers.
      *
-     * @type {AnimComponentLayer[]}
+     * @type {ReadonlyArray<AnimComponentLayer>}
      */
     get layers() {
         return this._layers;
@@ -345,7 +378,7 @@ class AnimComponent extends Component {
      * @param {object[]} [mask] - A list of paths to bones in the model which should be animated in
      * this layer. If omitted the full model is used. Defaults to null.
      * @param {string} [blendType] - Defines how properties animated by this layer blend with
-     * animations of those properties in previous layers. Defaults to pc.ANIM_LAYER_OVERWRITE.
+     * animations of those properties in previous layers. Defaults to ANIM_LAYER_OVERWRITE.
      * @returns {AnimComponentLayer} The created anim component layer.
      */
     addLayer(name, weight, mask, blendType) {
@@ -525,6 +558,21 @@ class AnimComponent extends Component {
         for (let i = 0; i < this._layers.length; i++) {
             this._layers[i].rebind();
         }
+    }
+
+    /**
+     * Tests whether the given entity is part of the hierarchy this component animates. The binders
+     * resolve their targets within the root bone when one is assigned, and within this component's
+     * entity otherwise, so anything they bind - including the mesh instances backing morph target
+     * weights and animated material textures - belongs to an entity at or below that root.
+     *
+     * @param {Entity} entity - The entity to test.
+     * @returns {boolean} True if the entity is part of the animated hierarchy.
+     * @ignore
+     */
+    animatesEntity(entity) {
+        const graph = this._rootBone || this.entity;
+        return graph === entity || graph.isAncestorOf(entity);
     }
 
     /**
@@ -810,8 +858,8 @@ class AnimComponent extends Component {
     }
 
     resolveDuplicatedEntityReferenceProperties(oldAnim, duplicatedIdsMap) {
-        if (oldAnim.rootBone && duplicatedIdsMap[oldAnim.rootBone.getGuid()]) {
-            this.rootBone = duplicatedIdsMap[oldAnim.rootBone.getGuid()];
+        if (oldAnim.rootBone && duplicatedIdsMap[oldAnim.rootBone.guid]) {
+            this.rootBone = duplicatedIdsMap[oldAnim.rootBone.guid];
         } else {
             this.rebind();
         }

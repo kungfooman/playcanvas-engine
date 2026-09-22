@@ -5,10 +5,18 @@
  */
 
 /**
- * An object that manages the case where an object holds a reference to an asset and needs to be
- * notified when changes occur in the asset. e.g. notifications include load, add and remove
- * events.
+ * An AssetReference follows a single asset slot on behalf of its owner, such as the texture
+ * property of a component, and calls back when that asset is added to the registry, loads or is
+ * removed. Point it at an asset by setting {@link id} or {@link url}. The asset does not need to
+ * exist yet: the `add` callback fires when an asset with that id or URL is later registered. The
+ * `unload` callback is delivered only for a reference by id.
  *
+ * @example
+ * const reference = new AssetReference('textureAsset', this, this.app.assets, {
+ *     load: this.onTextureAssetLoad,
+ *     remove: this.onTextureAssetRemove
+ * }, this);
+ * reference.id = this.textureAsset.id;
  * @category Asset
  */
 class AssetReference {
@@ -74,7 +82,7 @@ class AssetReference {
      * unload(propertyName, parent, asset).
      * @param {object} [scope] - The scope to call the callbacks in.
      * @example
-     * const reference = new pc.AssetReference('textureAsset', this, this.app.assets, {
+     * const reference = new AssetReference('textureAsset', this, this.app.assets, {
      *     load: this.onTextureAssetLoad,
      *     add: this.onTextureAssetAdd,
      *     remove: this.onTextureAssetRemove
@@ -118,7 +126,7 @@ class AssetReference {
     /**
      * Gets the asset id which this references.
      *
-     * @type {number}
+     * @type {number|null}
      */
     get id() {
         return this._id;

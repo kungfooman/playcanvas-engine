@@ -27,7 +27,11 @@ import { SCRIPT_INITIALIZE, SCRIPT_POST_INITIALIZE } from './constants.js';
  * Below is a simple example of a script that rotates an entity every frame.
  * @example
  * ```javascript
- * class EntityRotator extends Script {
+ * import { Script } from 'playcanvas';
+ *
+ * export class Rotator extends Script {
+ *     static scriptName = 'rotator';
+ *
  *     update(dt) {
  *         this.entity.rotateLocal(0, 1, 0);
  *     }
@@ -39,6 +43,12 @@ import { SCRIPT_INITIALIZE, SCRIPT_POST_INITIALIZE } from './constants.js';
  *
  * For more information on how to create scripts, see the [Scripting Overview](https://developer.playcanvas.com/user-manual/scripting/).
  *
+ * The `playcanvas` package also ships a library of ready-to-use `Script` subclasses under the
+ * `playcanvas/scripts/esm/` subpath — camera and character controllers, post-processing, water,
+ * sky, grid, shadow catcher, planar reflections, XR and Gaussian-splat effects. Import them
+ * directly, for example
+ * `import { CameraControls } from 'playcanvas/scripts/esm/camera-controls.mjs'`.
+ *
  * @category Script
  */
 export class Script extends EventHandler {
@@ -48,6 +58,7 @@ export class Script extends EventHandler {
      * @event
      * @example
      * export class PlayerController extends Script {
+     *     static scriptName = 'playerController';
      *     initialize() {
      *         this.on('enable', () => {
      *             // Script Instance is now enabled
@@ -63,6 +74,7 @@ export class Script extends EventHandler {
      * @event
      * @example
      * export class PlayerController extends Script {
+     *     static scriptName = 'playerController';
      *     initialize() {
      *         this.on('disable', () => {
      *             // Script Instance is now disabled
@@ -79,6 +91,7 @@ export class Script extends EventHandler {
      * @event
      * @example
      * export class PlayerController extends Script {
+     *     static scriptName = 'playerController';
      *     initialize() {
      *         this.on('state', (enabled) => {
      *             console.log(`Script Instance is now ${enabled ? 'enabled' : 'disabled'}`);
@@ -94,6 +107,7 @@ export class Script extends EventHandler {
      * @event
      * @example
      * export class PlayerController extends Script {
+     *     static scriptName = 'playerController';
      *     initialize() {
      *         this.on('destroy', () => {
      *             // no longer part of the entity
@@ -117,6 +131,7 @@ export class Script extends EventHandler {
      * @event
      * @example
      * export class PlayerController extends Script {
+     *     static scriptName = 'playerController';
      *     initialize() {
      *         this.on('attr', (name, newValue, oldValue) => {
      *             console.log(`Attribute '${name}' changed from '${oldValue}' to '${newValue}'`);
@@ -125,6 +140,7 @@ export class Script extends EventHandler {
      * };
      * @example
      * export class PlayerController extends Script {
+     *     static scriptName = 'playerController';
      *     initialize() {
      *         this.on('attr:speed', (newValue, oldValue) => {
      *             console.log(`Attribute 'speed' changed from '${oldValue}' to '${newValue}'`);
@@ -142,6 +158,7 @@ export class Script extends EventHandler {
      * @event
      * @example
      * export class PlayerController extends Script {
+     *     static scriptName = 'playerController';
      *     initialize() {
      *         this.on('error', (err, method) => {
      *             // caught an exception
@@ -197,8 +214,8 @@ export class Script extends EventHandler {
      * Create a new Script instance.
      *
      * @param {object} args - The input arguments object.
-     * @param {AppBase} args.app - The {@link AppBase} that is running the script.
-     * @param {Entity} args.entity - The {@link Entity} that the script is attached to.
+     * @param {AppBase} args.app - The AppBase that is running the script.
+     * @param {Entity} args.entity - The Entity that the script is attached to.
      */
     constructor(args) {
         super();
@@ -206,11 +223,9 @@ export class Script extends EventHandler {
     }
 
     /**
-     * True if the instance of this script is in running state. False when script is not running,
-     * because the Entity or any of its parents are disabled or the {@link ScriptComponent} is
-     * disabled or the Script Instance is disabled. When disabled, no update methods will be called
-     * on each tick. `initialize` and `postInitialize` methods will run once when the script
-     * instance is in the `enabled` state during an app tick.
+     * Sets the enabled state of the script instance. When disabled, no update methods will be
+     * called on each tick. `initialize` and `postInitialize` methods will run once when the script
+     * instance is next in the `enabled` state during an app tick.
      *
      * @type {boolean}
      */
@@ -248,6 +263,13 @@ export class Script extends EventHandler {
         }
     }
 
+    /**
+     * Gets the running state of the script instance. Returns true when the script instance is
+     * enabled and its owning {@link Entity} (and all ancestors) and {@link ScriptComponent} are
+     * also enabled; otherwise false.
+     *
+     * @type {boolean}
+     */
     get enabled() {
         return this._enabled && !this._destroyed && this.entity.script.enabled && this.entity.enabled;
     }
@@ -255,8 +277,8 @@ export class Script extends EventHandler {
     /**
      * @typedef {object} ScriptInitializationArgs
      * @property {boolean} [enabled] - True if the script instance is in running state.
-     * @property {AppBase} app - The {@link AppBase} that is running the script.
-     * @property {Entity} entity - The {@link Entity} that the script is attached to.
+     * @property {AppBase} app - The AppBase that is running the script.
+     * @property {Entity} entity - The Entity that the script is attached to.
      */
 
     /**
@@ -280,9 +302,7 @@ export class Script extends EventHandler {
     }
 
     /**
-     * Name of a Script Type.
-     *
-     * @type {string}
+     * @type {string|null}
      * @private
      */
     static __name = null; // Will be assigned when calling createScript or registerScript.
@@ -295,7 +315,16 @@ export class Script extends EventHandler {
     static __getScriptName = getScriptName;
 
     /**
-     * Name of a Script Type.
+     * Sets the unique name of the script.
+     *
+     * @type {string|null}
+     */
+    static set scriptName(value) {
+        this.__name = value;
+    }
+
+    /**
+     * Gets the unique name of the script.
      *
      * @type {string|null}
      */
@@ -342,14 +371,57 @@ export class Script extends EventHandler {
 const funcNameRegex = /^\s*function(?:\s|\s*\/\*.*\*\/\s*)+([^(\s\/]*)\s*/;
 
 /**
+ * Converts the first character of a string to lower case. Returns the input unchanged if it is
+ * empty or not a non-empty string (avoids throwing on e.g. an anonymous class's empty name).
+ *
+ * @param {string} str - The string to convert.
+ * @returns {string} The converted string.
+ */
+export const toLowerCamelCase = str => (str ? str[0].toLowerCase() + str.substring(1) : str);
+
+/**
+ * Returns the intrinsic (display) name of a script class - either a `scriptName` declared on the
+ * class itself, or its class name. Only an own `scriptName` is used, never one inherited from a
+ * base class: a subclass that does not declare its own `scriptName` would otherwise report its
+ * parent's name. This is primarily used for diagnostics; for the name a script is registered under
+ * use {@link getScriptRegistryName}.
+ *
  * @param {Function} constructorFn - The constructor function of the script type.
  * @returns {string|undefined} The script name.
  */
 export function getScriptName(constructorFn) {
     if (typeof constructorFn !== 'function') return undefined;
-    if (constructorFn.scriptName) return constructorFn.scriptName;
+    if (Object.prototype.hasOwnProperty.call(constructorFn, 'scriptName') && constructorFn.scriptName) {
+        return constructorFn.scriptName;
+    }
     if ('name' in Function.prototype) return constructorFn.name;
     if (constructorFn === Function || constructorFn === Function.prototype.constructor) return 'Function';
     const match = (`${constructorFn}`).match(funcNameRegex);
     return match ? match[1] : undefined;
+}
+
+/**
+ * Returns the name a script class should be registered (and looked up) under. Considers only
+ * properties declared on the class itself - never inherited from a base class - so that a subclass
+ * does not adopt (and then overwrite in the registry) the name already registered for its base
+ * class. Resolution order:
+ *
+ * 1. an own `__name` already assigned to the class (e.g. an explicit registration name);
+ * 2. an own `scriptName` declared on the class, used verbatim;
+ * 3. the class name converted to lowerCamelCase (the convention used when no name is declared,
+ *    matching the ESM asset loader and {@link ScriptComponent#create}).
+ *
+ * @param {Function} constructorFn - The constructor function of the script type.
+ * @returns {string|undefined} The resolved name, or undefined if it cannot be determined.
+ */
+export function getScriptRegistryName(constructorFn) {
+    if (typeof constructorFn !== 'function') return undefined;
+    if (Object.prototype.hasOwnProperty.call(constructorFn, '__name') && constructorFn.__name) {
+        return constructorFn.__name;
+    }
+    if (Object.prototype.hasOwnProperty.call(constructorFn, 'scriptName') && constructorFn.scriptName) {
+        return constructorFn.scriptName;
+    }
+    const name = getScriptName(constructorFn);
+    return name ? toLowerCamelCase(name) : undefined;
 }

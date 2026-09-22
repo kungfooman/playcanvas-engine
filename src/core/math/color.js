@@ -5,9 +5,26 @@ import { math } from './math.js';
  *
  * Each color component is a floating point value in the range 0 to 1. The {@link r} (red),
  * {@link g} (green) and {@link b} (blue) components define a color in RGB color space. The
- * {@link a} (alpha) component defines transparency. An alpha of 1 is fully opaque. An alpha of
- * 0 is fully transparent.
+ * {@link a} (alpha) component defines transparency. An alpha of 1 is fully opaque. An alpha of 0 is
+ * fully transparent.
  *
+ * A Color stores the values it is given and does not track whether they are in linear or gamma
+ * (sRGB) space. Convert explicitly with {@link linear} and {@link gamma} when a value crosses that
+ * boundary. {@link fromString} and {@link toString} exchange colors with the `#RRGGBB` and
+ * `#RRGGBBAA` notation used by CSS, and {@link lerp} blends two colors.
+ *
+ * Methods modify the color they are called on and return it for chaining. Use {@link clone} for an
+ * independent copy and {@link copy} to overwrite. The named constants such as {@link WHITE} and
+ * {@link RED} are frozen shared instances, so copy one before modifying it.
+ *
+ * @example
+ * // Set a material color from a CSS hex string
+ * material.diffuse.fromString('#ff8800');
+ * material.update();
+ * @example
+ * // Fade between two colors without allocating
+ * const tint = new Color();
+ * tint.lerp(Color.RED, Color.BLUE, t);
  * @category Math
  */
 class Color {
@@ -48,8 +65,8 @@ class Color {
      * @param {number} [b] - The b value. Defaults to 0.
      * @param {number} [a] - The a value. Defaults to 1.
      * @example
-     * const c1 = new pc.Color(); // defaults to 0, 0, 0, 1
-     * const c2 = new pc.Color(0.1, 0.2, 0.3, 0.4);
+     * const c1 = new Color(); // defaults to 0, 0, 0, 1
+     * const c2 = new Color(0.1, 0.2, 0.3, 0.4);
      */
     /**
      * Creates a new Color instance.
@@ -57,7 +74,7 @@ class Color {
      * @overload
      * @param {number[]} arr - The array to set the color values from.
      * @example
-     * const c = new pc.Color([0.1, 0.2, 0.3, 0.4]);
+     * const c = new Color([0.1, 0.2, 0.3, 0.4]);
      */
     /**
      * @param {number|number[]} [r] - The r value. Defaults to 0. If r is an array of length 3 or
@@ -85,6 +102,10 @@ class Color {
      * Returns a clone of the specified color.
      *
      * @returns {this} A duplicate color object.
+     * @example
+     * const c = new Color(1, 0, 0, 1);
+     * const cClone = c.clone();
+     * // cClone is [1, 0, 0, 1]
      */
     clone() {
         /** @type {this} */
@@ -98,8 +119,8 @@ class Color {
      * @param {Color} rhs - A color to copy to the specified color.
      * @returns {Color} Self for chaining.
      * @example
-     * const src = new pc.Color(1, 0, 0, 1);
-     * const dst = new pc.Color();
+     * const src = new Color(1, 0, 0, 1);
+     * const dst = new Color();
      *
      * dst.copy(src);
      *
@@ -120,8 +141,8 @@ class Color {
      * @param {Color} rhs - The color to compare to the specified color.
      * @returns {boolean} True if the colors are equal and false otherwise.
      * @example
-     * const a = new pc.Color(1, 0, 0, 1);
-     * const b = new pc.Color(1, 1, 0, 1);
+     * const a = new Color(1, 0, 0, 1);
+     * const b = new Color(1, 1, 0, 1);
      * console.log("The two colors are " + (a.equals(b) ? "equal" : "different"));
      */
     equals(rhs) {
@@ -132,10 +153,14 @@ class Color {
      * Assign values to the color components, including alpha.
      *
      * @param {number} r - The value for red (0-1).
-     * @param {number} g - The value for blue (0-1).
-     * @param {number} b - The value for green (0-1).
+     * @param {number} g - The value for green (0-1).
+     * @param {number} b - The value for blue (0-1).
      * @param {number} [a] - The value for the alpha (0-1), defaults to 1.
      * @returns {Color} Self for chaining.
+     * @example
+     * const c = new Color();
+     * c.set(1, 0, 0, 1);
+     * // c is now red [1, 0, 0, 1]
      */
     set(r, g, b, a = 1) {
         this.r = r;
@@ -156,9 +181,9 @@ class Color {
      * range, the linear interpolant will occur on a ray extrapolated from this line.
      * @returns {Color} Self for chaining.
      * @example
-     * const a = new pc.Color(0, 0, 0);
-     * const b = new pc.Color(1, 1, 0.5);
-     * const r = new pc.Color();
+     * const a = new Color(0, 0, 0);
+     * const b = new Color(1, 1, 0.5);
+     * const r = new Color();
      *
      * r.lerp(a, b, 0);   // r is equal to a
      * r.lerp(a, b, 0.5); // r is 0.5, 0.5, 0.25
@@ -179,6 +204,10 @@ class Color {
      * @param {Color} [src] - The color to convert to linear color space. If not set, the operation
      * is done in place.
      * @returns {Color} Self for chaining.
+     * @example
+     * const c = new Color(0.5, 0.5, 0.5, 1);
+     * c.linear();
+     * // c is now approximately [0.218, 0.218, 0.218, 1]
      */
     linear(src = this) {
         this.r = Math.pow(src.r, 2.2);
@@ -194,6 +223,10 @@ class Color {
      * @param {Color} [src] - The color to convert to gamma color space. If not set, the operation is
      * done in place.
      * @returns {Color} Self for chaining.
+     * @example
+     * const c = new Color(0.218, 0.218, 0.218, 1);
+     * c.gamma();
+     * // c is now approximately [0.5, 0.5, 0.5, 1]
      */
     gamma(src = this) {
         this.r = Math.pow(src.r, 1 / 2.2);
@@ -208,6 +241,10 @@ class Color {
      *
      * @param {number} scalar - The number to multiply by.
      * @returns {Color} Self for chaining.
+     * @example
+     * const c = new Color(0.2, 0.4, 0.6, 1);
+     * c.mulScalar(2);
+     * // c is now [0.4, 0.8, 1.2, 1]
      */
     mulScalar(scalar) {
         this.r *= scalar;
@@ -223,6 +260,10 @@ class Color {
      * RR, GG, BB, AA are red, green, blue and alpha values. This is the same format used in
      * HTML/CSS.
      * @returns {Color} Self for chaining.
+     * @example
+     * const c = new Color();
+     * c.fromString('#ff0000');
+     * // c is now [1, 0, 0, 1]
      */
     fromString(hex) {
         const i = parseInt(hex.replace('#', '0x'), 16);
@@ -240,14 +281,14 @@ class Color {
     }
 
     /**
-     * Set the values of the vector from an array.
+     * Set the values of the color from an array.
      *
-     * @param {number[]} arr - The array to set the vector values from.
+     * @param {number[]} arr - The array to set the color values from.
      * @param {number} [offset] - The zero-based index at which to start copying elements from the
      * array. Default is 0.
      * @returns {Color} Self for chaining.
      * @example
-     * const c = new pc.Color();
+     * const c = new Color();
      * c.fromArray([1, 0, 1, 1]);
      * // c is set to [1, 0, 1, 1]
      */
@@ -269,8 +310,8 @@ class Color {
      * @param {boolean} [asArray] - If true, the output will be an array of numbers. Defaults to false.
      * @returns {string} The color in string form.
      * @example
-     * const c = new pc.Color(1, 1, 1);
-     * // Outputs #ffffffff
+     * const c = new Color(1, 1, 1);
+     * // Outputs #ffffff
      * console.log(c.toString());
      */
     toString(alpha, asArray) {
@@ -295,6 +336,22 @@ class Color {
     }
 
     /**
+     * @overload
+     * @param {number[]} [arr] - The array to populate with the color's number
+     * components. If not specified, a new array is created.
+     * @param {number} [offset] - The zero-based index at which to start copying elements to the
+     * array. Default is 0.
+     * @returns {number[]} The color as an array.
+     */
+    /**
+     * @overload
+     * @param {ArrayBufferView} arr - The array to populate with the color's number
+     * components. If not specified, a new array is created.
+     * @param {number} [offset] - The zero-based index at which to start copying elements to the
+     * array. Default is 0.
+     * @returns {ArrayBufferView} The color as an array.
+     */
+    /**
      * Converts the color to an array.
      *
      * @param {number[]|ArrayBufferView} [arr] - The array to populate with the color's number
@@ -304,7 +361,7 @@ class Color {
      * @param {boolean} [alpha] - If true, the output array will include the alpha value.
      * @returns {number[]|ArrayBufferView} The color as an array.
      * @example
-     * const c = new pc.Color(1, 1, 1);
+     * const c = new Color(1, 1, 1);
      * // Outputs [1, 1, 1, 1]
      * console.log(c.toArray());
      */

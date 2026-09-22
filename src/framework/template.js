@@ -7,6 +7,8 @@ import { SceneParser } from './parsers/scene.js';
 
 /**
  * Create a Template resource from raw database data.
+ *
+ * @category Framework
  */
 class Template {
     /**
@@ -53,6 +55,16 @@ class Template {
         const parser = new SceneParser(this._app, true);
 
         this._templateRoot = parser.parse(this._data);
+    }
+
+    set data(value) {
+        this._data = value;
+        // cache invalidation: the next instantiate() will parse and use the new _data
+        this._templateRoot = null;
+    }
+
+    get data() {
+        return this._data;
     }
 }
 

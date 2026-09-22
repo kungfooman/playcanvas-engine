@@ -1,31 +1,63 @@
-import { deviceType, rootPath } from 'examples/utils';
-import * as pc from 'playcanvas';
+import {
+    AppBase,
+    AppOptions,
+    Asset,
+    AssetListLoader,
+    BAKE_COLOR,
+    CameraComponentSystem,
+    Color,
+    Entity,
+    FILLMODE_FILL_WINDOW,
+    LightComponentSystem,
+    Lightmapper,
+    Mouse,
+    RESOLUTION_AUTO,
+    RenderComponentSystem,
+    SHADOW_PCF3_32F,
+    ScriptComponentSystem,
+    ScriptHandler,
+    StandardMaterial,
+    TouchDevice,
+    createGraphicsDevice
+} from 'playcanvas';
+
+import { data, deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
 
-const gfxOptions = {
-    deviceTypes: [deviceType],
-    glslangUrl: `${rootPath}/static/lib/glslang/glslang.js`,
-    twgslUrl: `${rootPath}/static/lib/twgsl/twgsl.js`
+const assets = {
+    script: new Asset('script', 'script', { url: './scripts/camera/orbit-camera.js' })
 };
 
-const device = await pc.createGraphicsDevice(canvas, gfxOptions);
+const gfxOptions = {
+    deviceTypes: [deviceType]
+};
+
+const device = await createGraphicsDevice(canvas, gfxOptions);
 device.maxPixelRatio = Math.min(window.devicePixelRatio, 2);
 
-const createOptions = new pc.AppOptions();
+const createOptions = new AppOptions();
 createOptions.graphicsDevice = device;
+createOptions.mouse = new Mouse(document.body);
+createOptions.touch = new TouchDevice(document.body);
 
-createOptions.lightmapper = pc.Lightmapper;
+createOptions.lightmapper = Lightmapper;
 
-createOptions.componentSystems = [pc.RenderComponentSystem, pc.CameraComponentSystem, pc.LightComponentSystem];
+createOptions.componentSystems = [
+    RenderComponentSystem,
+    CameraComponentSystem,
+    LightComponentSystem,
+    ScriptComponentSystem
+];
+createOptions.resourceHandlers = [ScriptHandler];
 
-const app = new pc.AppBase(canvas);
+const app = new AppBase(canvas);
 app.init(createOptions);
 
 // Set the canvas to fill the window and automatically change resolution to be the same as the canvas size
-app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
-app.setCanvasResolution(pc.RESOLUTION_AUTO);
+app.setCanvasFillMode(FILLMODE_FILL_WINDOW);
+app.setCanvasResolution(RESOLUTION_AUTO);
 
 // Ensure canvas is resized when window changes size
 const resize = () => app.resizeCanvas();
@@ -34,37 +66,21 @@ app.on('destroy', () => {
     window.removeEventListener('resize', resize);
 });
 
+await new Promise((resolve) => {
+    new AssetListLoader(Object.values(assets), app.assets).load(resolve);
+});
+
 app.start();
 
-// create material used on the geometry
-const material = new pc.StandardMaterial();
+// Create material used on the geometry
+const material = new StandardMaterial();
 material.gloss = 0.6;
 material.metalness = 0.4;
 material.useMetalness = true;
 material.update();
 
-// All render component primitive shape types
-const shapes = ['box', 'cone', 'cylinder', 'sphere', 'capsule', 'torus'];
-
-for (let i = 0; i < 40; i++) {
-    const shape = shapes[Math.floor(Math.random() * shapes.length)];
-
-    // Create an entity with a render component that is set up to be lightmapped with baked direct lighting
-    const entity = new pc.Entity();
-    entity.addComponent('render', {
-        castShadows: false,
-        castShadowsLightmap: true,
-        lightmapped: true,
-        type: shape,
-        material: material
-    });
-    app.root.addChild(entity);
-
-    // random orientation
-    entity.setLocalPosition(Math.random() * 10 - 5, Math.random() * 5, Math.random() * 10 - 5);
-}
-
-const ground = new pc.Entity();
+// Ground plane
+const ground = new Entity();
 ground.addComponent('render', {
     castShadows: false,
     lightmapped: true,
@@ -72,30 +88,70 @@ ground.addComponent('render', {
     material: material
 });
 app.root.addChild(ground);
-ground.setLocalPosition(0, -1, 0);
-ground.setLocalScale(40, 40, 40);
+ground.setLocalPosition(0, 0, 0);
+ground.setLocalScale(20, 20, 20);
 
-// Create an entity with a directional light component that is configured as a baked light
-const light = new pc.Entity();
-light.addComponent('light', {
-    affectDynamic: false,
-    affectLightmapped: true,
-    bake: true,
-    castShadows: true,
-    normalOffsetBias: 0.05,
-    shadowBias: 0.2,
-    shadowDistance: 50,
-    shadowResolution: 2048,
-    shadowType: pc.SHADOW_PCF3_32F,
-    color: pc.Color.GREEN,
-    type: 'directional'
-});
-app.root.addChild(light);
-light.setLocalEulerAngles(45, 30, 0);
+// All render component primitive shape types
+const shapes = ['box', 'cone', 'cylinder', 'sphere', 'capsule', 'torus'];
+
+// Create objects in an 8x8 grid
+const gridSize = 8;
+const spacing = 1.0;
+const startOffset = -((gridSize - 1) * spacing) / 2;
+
+for (let x = 0; x < gridSize; x++) {
+    for (let z = 0; z < gridSize; z++) {
+        // Deterministic shape based on grid position
+        const shapeIndex = (x + z * gridSize) % shapes.length;
+        const shape = shapes[shapeIndex];
+
+        // Create an entity with a render component that is set up to be lightmapped with baked direct lighting
+        const entity = new Entity();
+        entity.addComponent('render', {
+            castShadows: false,
+            castShadowsLightmap: true,
+            lightmapped: true,
+            type: shape,
+            material: material
+        });
+        app.root.addChild(entity);
+
+        // Position in grid
+        const posX = startOffset + x * spacing;
+        const posZ = startOffset + z * spacing;
+        entity.setLocalPosition(posX, 1.5, posZ);
+        entity.setLocalScale(0.5, 0.5, 0.5);
+    }
+}
+
+// Position for lights - halfway between center and corners
+const lightOffset = 2.5;
+const lightHeight = 4;
+
+// Create emissive material for omni light visualization (green)
+const emissiveMaterialGreen = new StandardMaterial();
+emissiveMaterialGreen.emissive = Color.GREEN;
+emissiveMaterialGreen.emissiveIntensity = 5;
+emissiveMaterialGreen.useLighting = false;
+emissiveMaterialGreen.update();
+
+// Create emissive material for spot light visualization (red)
+const emissiveMaterialRed = new StandardMaterial();
+emissiveMaterialRed.emissive = Color.RED;
+emissiveMaterialRed.emissiveIntensity = 5;
+emissiveMaterialRed.useLighting = false;
+emissiveMaterialRed.update();
+
+// Create emissive material for directional light visualization (yellow)
+const emissiveMaterialYellow = new StandardMaterial();
+emissiveMaterialYellow.emissive = Color.YELLOW;
+emissiveMaterialYellow.emissiveIntensity = 5;
+emissiveMaterialYellow.useLighting = false;
+emissiveMaterialYellow.update();
 
 // Create an entity with an omni light component that is configured as a baked light
-const lightPoint = new pc.Entity();
-lightPoint.addComponent('light', {
+const lightOmni = new Entity();
+lightOmni.addComponent('light', {
     affectDynamic: false,
     affectLightmapped: true,
     bake: true,
@@ -104,41 +160,168 @@ lightPoint.addComponent('light', {
     shadowBias: 0.2,
     shadowDistance: 50,
     shadowResolution: 512,
-    shadowType: pc.SHADOW_PCF3_32F,
-    color: pc.Color.RED,
-    range: 100,
-    type: 'point'
+    shadowType: SHADOW_PCF3_32F,
+    color: Color.GREEN,
+    range: 7,
+    type: 'omni'
 });
-lightPoint.setLocalPosition(0, 2, 0);
-app.root.addChild(lightPoint);
+// Add visible sphere to represent omni light
+lightOmni.addComponent('render', {
+    type: 'sphere',
+    material: emissiveMaterialGreen,
+    castShadows: false,
+    castShadowsLightmap: false
+});
+app.root.addChild(lightOmni);
+lightOmni.setLocalPosition(-lightOffset, lightHeight, -lightOffset);
+
+// Create an entity with a spot light component that is configured as a baked light
+const lightSpot = new Entity();
+lightSpot.addComponent('light', {
+    affectDynamic: false,
+    affectLightmapped: true,
+    bake: true,
+    castShadows: true,
+    normalOffsetBias: 0.05,
+    shadowBias: 0.2,
+    shadowDistance: 50,
+    shadowResolution: 512,
+    shadowType: SHADOW_PCF3_32F,
+    color: Color.RED,
+    range: 15,
+    innerConeAngle: 30,
+    outerConeAngle: 45,
+    type: 'spot'
+});
+lightSpot.setLocalPosition(lightOffset, lightHeight, lightOffset);
+lightSpot.setLocalEulerAngles(0, 0, 0); // Point straight down (spotlight shines along -Y by default)
+app.root.addChild(lightSpot);
+
+// Add visible cone as child entity, rotated to point down visually
+const spotCone = new Entity();
+spotCone.addComponent('render', {
+    type: 'cone',
+    material: emissiveMaterialRed,
+    castShadows: false,
+    castShadowsLightmap: false
+});
+spotCone.setLocalEulerAngles(0, 0, 0); // Cone points up by default, same as light direction visualization
+lightSpot.addChild(spotCone);
+
+// Create an entity with a directional light component that is configured as a baked light
+const lightDirectional = new Entity();
+lightDirectional.addComponent('light', {
+    affectDynamic: false,
+    affectLightmapped: true,
+    bake: true,
+    castShadows: true,
+    normalOffsetBias: 0.05,
+    shadowBias: 0.2,
+    shadowDistance: 50,
+    shadowResolution: 2048,
+    shadowType: SHADOW_PCF3_32F,
+    color: Color.YELLOW,
+    intensity: 0.33,
+    type: 'directional'
+});
+app.root.addChild(lightDirectional);
+lightDirectional.setLocalPosition(0, lightHeight, 0);
+lightDirectional.setLocalEulerAngles(60, -45, 0); // Point straight down (light shines along -Y)
+
+// Add visible slim cylinder as child entity for directional light
+const dirCylinder = new Entity();
+dirCylinder.addComponent('render', {
+    type: 'cylinder',
+    material: emissiveMaterialYellow,
+    castShadows: false,
+    castShadowsLightmap: false
+});
+dirCylinder.setLocalScale(0.2, 1, 0.2); // Slim cylinder
+lightDirectional.addChild(dirCylinder);
 
 // Create an entity with a camera component
-const camera = new pc.Entity();
+const camera = new Entity();
 camera.addComponent('camera', {
-    clearColor: new pc.Color(0.4, 0.45, 0.5),
+    clearColor: new Color(0.4, 0.45, 0.5),
     farClip: 100,
     nearClip: 0.05
 });
+camera.setLocalPosition(1, 3, -1);
+
+// Add orbit camera script with mouse and touch support
+camera.addComponent('script');
+camera.script.create('orbitCamera', {
+    attributes: {
+        inertiaFactor: 0.2,
+        distanceMax: 15
+    }
+});
+camera.script.create('orbitCameraInputMouse');
+camera.script.create('orbitCameraInputTouch');
 app.root.addChild(camera);
 
 // lightmap baking properties
-app.scene.lightmapMode = pc.BAKE_COLOR;
+const bakeType = BAKE_COLOR;
+app.scene.lightmapMode = bakeType;
 app.scene.lightmapMaxResolution = 2048;
 
 // For baked lights, this property perhaps has the biggest impact on lightmap resolution:
 app.scene.lightmapSizeMultiplier = 32;
 
-// bake lightmaps
-app.lightmapper.bake(null, pc.BAKE_COLORDIR);
+// Bake when settings change or GPU-generated lightmaps need restoring
+let needBake = false;
 
-// Set an update function on the app's update event
-let time = 4;
-app.on('update', (dt) => {
-    time += dt;
-
-    // orbit camera
-    camera.setLocalPosition(20 * Math.sin(time * 0.4), 3, 6);
-    camera.lookAt(pc.Vec3.ZERO);
+device.on('devicerestored', () => {
+    needBake = true;
 });
 
-export { app };
+// Handle data changes from HUD to modify light enabled state
+data.on('*:set', (/** @type {string} */ path, value) => {
+    let bakeSettingChanged = true;
+    const pathArray = path.split('.');
+
+    if (pathArray[1] === 'lights') {
+        if (pathArray[2] === 'omni') {
+            lightOmni.enabled = value;
+        } else if (pathArray[2] === 'spot') {
+            lightSpot.enabled = value;
+        } else if (pathArray[2] === 'directional') {
+            lightDirectional.enabled = value;
+        } else if (pathArray[2] === 'soft') {
+            // Enable soft shadows for directional light
+            lightDirectional.light.bakeNumSamples = value ? 15 : 1;
+            lightDirectional.light.bakeArea = value ? 20 : 0;
+            // Enable lightmap filtering when soft is on
+            app.scene.lightmapFilterEnabled = value;
+            app.scene.lightmapFilterRange = 5;
+            app.scene.lightmapFilterSmoothness = 0.1;
+        }
+    } else {
+        bakeSettingChanged = false;
+    }
+
+    // Trigger bake on the next frame if relevant settings were changed
+    needBake ||= bakeSettingChanged;
+});
+
+// Initial data for controls
+data.set('data', {
+    lights: {
+        omni: true,
+        spot: true,
+        directional: true,
+        soft: false
+    }
+});
+
+// Set an update function on the app's update event
+app.on('update', (_dt) => {
+    // Bake lightmaps when requested
+    if (needBake) {
+        needBake = false;
+        app.lightmapper.bake(null, bakeType);
+    }
+});
+
+// Initial bake
+app.lightmapper.bake(null, bakeType);

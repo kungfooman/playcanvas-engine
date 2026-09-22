@@ -1,4 +1,5 @@
 import { Debug, DebugHelper } from '../../../core/debug.js';
+import { StringIds } from '../../../core/string-ids.js';
 import { SHADERLANGUAGE_WGSL } from '../constants.js';
 import { DebugGraphics } from '../debug-graphics.js';
 import { ShaderProcessorGLSL } from '../shader-processor-glsl.js';
@@ -6,9 +7,13 @@ import { WebgpuDebug } from './webgpu-debug.js';
 import { WebgpuShaderProcessorWGSL } from './webgpu-shader-processor-wgsl.js';
 
 /**
+ * @import { BindGroupFormat } from '../bind-group-format.js'
  * @import { GraphicsDevice } from '../graphics-device.js'
  * @import { Shader } from '../shader.js'
  */
+
+// Shared StringIds instance for content-based compute shader keys
+const computeShaderIds = new StringIds();
 
 /**
  * A WebGPU implementation of the Shader.
@@ -16,6 +21,9 @@ import { WebgpuShaderProcessorWGSL } from './webgpu-shader-processor-wgsl.js';
  * @ignore
  */
 class WebgpuShader {
+    /** @type {BindGroupFormat|null} @private */
+    _ownedMeshBindGroupFormat = null;
+
     /**
      * Transpiled vertex shader code.
      *
@@ -36,6 +44,44 @@ class WebgpuShader {
      * @type {string|null}
      */
     _computeCode = null;
+
+    /**
+     * Cached content-based key for compute shader.
+     *
+     * @type {number|undefined}
+     * @private
+     */
+    _computeKey;
+
+    /**
+     * Caller-provided bind group format (compute, group 0), or null if none was supplied.
+     *
+     * @type {import('../bind-group-format.js').BindGroupFormat|null}
+     */
+    computeBindGroupFormat = null;
+
+    /**
+     * Bind group format for resources auto-reflected from the compute shader source. Lives at
+     * {@link computeReflectedGroupIndex}. Null when there is nothing to reflect.
+     *
+     * @type {import('../bind-group-format.js').BindGroupFormat|null}
+     */
+    computeReflectedBindGroupFormat = null;
+
+    /**
+     * Generated uniform buffer format holding the reflected loose uniforms, bound inside the
+     * reflected bind group. Null when the shader declares no loose uniforms.
+     *
+     * @type {import('../uniform-buffer-format.js').UniformBufferFormat|null}
+     */
+    computeReflectedUniformBufferFormat = null;
+
+    /**
+     * Bind group index of the reflected resources (0 when no caller format, otherwise 1).
+     *
+     * @type {number}
+     */
+    computeReflectedGroupIndex = 0;
 
     /**
      * Name of the vertex entry point function.
@@ -66,9 +112,11 @@ class WebgpuShader {
 
             if (definition.cshader) {
 
-                this._computeCode = definition.cshader ?? null;
-                this.computeUniformBufferFormats = definition.computeUniformBufferFormats;
-                this.computeBindGroupFormat = definition.computeBindGroupFormat;
+                if (definition.computeEntryPoint) {
+                    this.computeEntryPoint = definition.computeEntryPoint;
+                }
+
+                this.processComputeWGSL();
 
             } else {
 
@@ -107,6 +155,10 @@ class WebgpuShader {
     destroy(shader) {
         this._vertexCode = null;
         this._fragmentCode = null;
+        this._ownedMeshBindGroupFormat?.destroy();
+        this._ownedMeshBindGroupFormat = null;
+        this.computeReflectedBindGroupFormat?.destroy();
+        this.computeReflectedBindGroupFormat = null;
     }
 
     createShaderModule(code, shaderType) {
@@ -142,6 +194,7 @@ class WebgpuShader {
     }
 
     processGLSL() {
+        Debug.assert(this._ownedMeshBindGroupFormat === null, 'Shader processing must not replace an owned mesh bind group format.');
         const shader = this.shader;
 
         // process the shader source to allow for uniforms
@@ -163,10 +216,42 @@ class WebgpuShader {
 
         shader.meshUniformBufferFormat = processed.meshUniformBufferFormat;
         shader.meshBindGroupFormat = processed.meshBindGroupFormat;
+        this._ownedMeshBindGroupFormat = processed.meshBindGroupFormat;
         shader.attributes = processed.attributes;
     }
 
+    processComputeWGSL() {
+        const shader = this.shader;
+        const definition = shader.definition;
+
+        // a caller-provided bind group format occupies group 0; otherwise reflected resources
+        // start at group 0 (WebGPU pipeline layouts cannot have gaps)
+        const callerBindGroupFormat = definition.computeBindGroupFormat ?? null;
+        const reflectedGroupIndex = callerBindGroupFormat ? 1 : 0;
+
+        // reflect simplified-syntax declarations into a separate bind group, leaving any
+        // explicitly-bound resources (and the caller-provided format) untouched
+        const processed = WebgpuShaderProcessorWGSL.runCompute(shader.device, definition.cshader, definition, shader, reflectedGroupIndex);
+
+        // keep reference to processed shader in debug mode
+        Debug.call(() => {
+            this.processed = processed;
+        });
+
+        this._computeCode = processed.cshader;
+
+        // caller-provided (group 0) resources
+        this.computeBindGroupFormat = callerBindGroupFormat;
+        this.computeUniformBufferFormats = definition.computeUniformBufferFormats;
+
+        // reflected (engine-managed) resources and their generated uniform buffer
+        this.computeReflectedGroupIndex = reflectedGroupIndex;
+        this.computeReflectedBindGroupFormat = processed.computeBindGroupFormat;
+        this.computeReflectedUniformBufferFormat = processed.computeUniformBufferFormat;
+    }
+
     processWGSL() {
+        Debug.assert(this._ownedMeshBindGroupFormat === null, 'Shader processing must not replace an owned mesh bind group format.');
         const shader = this.shader;
 
         // process the shader source to allow for uniforms
@@ -182,13 +267,25 @@ class WebgpuShader {
 
         shader.meshUniformBufferFormat = processed.meshUniformBufferFormat;
         shader.meshBindGroupFormat = processed.meshBindGroupFormat;
+        this._ownedMeshBindGroupFormat = processed.meshBindGroupFormat;
         shader.attributes = processed.attributes;
     }
 
     transpile(src, shaderType, originalSrc) {
+
+        // make sure shader transpilers are available
+        const device = this.shader.device;
+        if (!device.glslang || !device.twgsl) {
+            console.error(`Cannot transpile shader [${this.shader.label}] - shader transpilers (glslang/twgsl) are not available. Make sure to provide glslangUrl and twgslUrl when creating the device.`, {
+                shader: this.shader
+            });
+            return null;
+        }
+
+        // transpile
         try {
-            const spirv = this.shader.device.glslang.compileGLSL(src, shaderType);
-            const wgsl = this.shader.device.twgsl.convertSpirV2WGSL(spirv);
+            const spirv = device.glslang.compileGLSL(src, shaderType);
+            const wgsl = device.twgsl.convertSpirV2WGSL(spirv);
             return wgsl;
         } catch (err) {
             console.error(`Failed to transpile webgl ${shaderType} shader [${this.shader.label}] to WebGPU while rendering ${DebugGraphics.toString()}, error:\n [${err.stack}]`, {
@@ -209,6 +306,21 @@ class WebgpuShader {
     get fragmentCode() {
         Debug.assert(this._fragmentCode);
         return this._fragmentCode;
+    }
+
+    /**
+     * Content-based key for compute shader caching. Returns the same key for identical
+     * shader code and entry point combinations, regardless of how many Shader instances exist.
+     *
+     * @type {number}
+     * @ignore
+     */
+    get computeKey() {
+        if (this._computeKey === undefined) {
+            const keyString = `${this._computeCode}|${this.computeEntryPoint}`;
+            this._computeKey = computeShaderIds.get(keyString);
+        }
+        return this._computeKey;
     }
 
     /**

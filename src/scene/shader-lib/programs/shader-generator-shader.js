@@ -1,14 +1,14 @@
 import { hashCode } from '../../../core/hash.js';
+import { MapUtils } from '../../../core/map-utils.js';
 import { SEMANTIC_ATTR15, SEMANTIC_BLENDINDICES, SEMANTIC_BLENDWEIGHT, SHADERLANGUAGE_GLSL, SHADERLANGUAGE_WGSL } from '../../../platform/graphics/constants.js';
-import { ShaderUtils } from '../../../platform/graphics/shader-utils.js';
-import { shaderChunksWGSL } from '../chunks-wgsl/chunks-wgsl.js';
-import { shaderChunks } from '../chunks/chunks.js';
+import { ShaderDefinitionUtils } from '../../../platform/graphics/shader-definition-utils.js';
 import { ShaderGenerator } from './shader-generator.js';
+import { ShaderChunks } from '../shader-chunks.js';
 
 class ShaderGeneratorShader extends ShaderGenerator {
     generateKey(options) {
 
-        // Note: options.chunks are not included in the key as currently shader variants are removed
+        // Note: options.shaderChunks are not included in the key as currently shader variants are removed
         // from the material when its chunks are modified.
 
         const desc = options.shaderDesc;
@@ -17,14 +17,16 @@ class ShaderGeneratorShader extends ShaderGenerator {
         const vsHashWGSL = desc.vertexWGSL ? hashCode(desc.vertexWGSL) : 0;
         const fsHashWGSL = desc.fragmentWGSL ? hashCode(desc.fragmentWGSL) : 0;
         const definesHash = ShaderGenerator.definesHash(options.defines);
+        const chunksKey = options.shaderChunks?.key ?? '';
 
-        let key = `${desc.uniqueName}_${definesHash}_${vsHashGLSL}_${fsHashGLSL}_${vsHashWGSL}_${fsHashWGSL}`;
+        let key = `${desc.uniqueName}_${definesHash}_${vsHashGLSL}_${fsHashGLSL}_${vsHashWGSL}_${fsHashWGSL}_${chunksKey}`;
 
         if (options.skin)                       key += '_skin';
         if (options.useInstancing)              key += '_inst';
         if (options.useMorphPosition)           key += '_morphp';
         if (options.useMorphNormal)             key += '_morphn';
         if (options.useMorphTextureBasedInt)    key += '_morphi';
+        if (options.useDualSourceBlending)       key += '_dualSource';
 
         return key;
     }
@@ -48,14 +50,15 @@ class ShaderGeneratorShader extends ShaderGenerator {
         definitionOptions.attributes = attributes;
     }
 
-    createVertexDefinition(definitionOptions, options, sharedIncludes, wgsl) {
-
-        const desc = options.shaderDesc;
-
-        const includes = new Map(sharedIncludes);
-        includes.set('transformInstancingVS', ''); // no default instancing, needs to be implemented in the user shader
-
-        const defines = new Map(options.defines);
+    /**
+     * Adds object / mesh level defines (derived from {@link MeshInstance} shader defines) to the
+     * supplied map. These describe properties of the rendered mesh and so are made available to
+     * both the vertex and fragment shaders.
+     *
+     * @param {Map<string, any>} defines - The defines map to add to.
+     * @param {object} options - The shader generation options.
+     */
+    addSharedDefines(defines, options) {
         if (options.skin) defines.set('SKIN', true);
         if (options.useInstancing) defines.set('INSTANCING', true);
         if (options.useMorphPosition || options.useMorphNormal) {
@@ -64,6 +67,17 @@ class ShaderGeneratorShader extends ShaderGenerator {
             if (options.useMorphPosition) defines.set('MORPHING_POSITION', true);
             if (options.useMorphNormal) defines.set('MORPHING_NORMAL', true);
         }
+    }
+
+    createVertexDefinition(definitionOptions, options, sharedIncludes, wgsl) {
+
+        const desc = options.shaderDesc;
+
+        const includes = new Map(sharedIncludes);
+        includes.set('transformInstancingVS', ''); // no default instancing, needs to be implemented in the user shader
+
+        const defines = new Map(options.defines);
+        this.addSharedDefines(defines, options);
 
         definitionOptions.vertexCode = wgsl ? desc.vertexWGSL : desc.vertexGLSL;
         definitionOptions.vertexIncludes = includes;
@@ -76,6 +90,7 @@ class ShaderGeneratorShader extends ShaderGenerator {
 
         const includes = new Map(sharedIncludes);
         const defines = new Map(options.defines);
+        this.addSharedDefines(defines, options);
 
         definitionOptions.fragmentCode = wgsl ? desc.fragmentWGSL : desc.fragmentGLSL;
         definitionOptions.fragmentIncludes = includes;
@@ -85,27 +100,28 @@ class ShaderGeneratorShader extends ShaderGenerator {
     createShaderDefinition(device, options) {
 
         const desc = options.shaderDesc;
-
-        const wgsl = device.isWebGPU && desc.vertexWGSL && desc.fragmentWGSL;
+        const wgsl = device.isWebGPU && !!desc.vertexWGSL && !!desc.fragmentWGSL && (options.shaderChunks?.useWGSL ?? true);
         const definitionOptions = {
             name: `ShaderMaterial-${desc.uniqueName}`,
             shaderLanguage: wgsl ? SHADERLANGUAGE_WGSL : SHADERLANGUAGE_GLSL,
             fragmentOutputTypes: desc.fragmentOutputTypes,
+            useDualSourceBlending: options.useDualSourceBlending,
             meshUniformBufferFormat: desc.meshUniformBufferFormat,
             meshBindGroupFormat: desc.meshBindGroupFormat
         };
 
-        const chunks = wgsl ? shaderChunksWGSL : shaderChunks;
-        const sharedIncludes = new Map(Object.entries({
-            ...chunks,  // default chunks
-            ...options.chunks // material override chunks
-        }));
+        // includes - default chunks
+        const shaderLanguage = wgsl ? SHADERLANGUAGE_WGSL : SHADERLANGUAGE_GLSL;
+        const sharedIncludes = MapUtils.merge(
+            ShaderChunks.get(device, shaderLanguage),
+            options.shaderChunks[shaderLanguage]
+        );
 
         this.createAttributesDefinition(definitionOptions, options);
         this.createVertexDefinition(definitionOptions, options, sharedIncludes, wgsl);
         this.createFragmentDefinition(definitionOptions, options, sharedIncludes, wgsl);
 
-        return ShaderUtils.createDefinition(device, definitionOptions);
+        return ShaderDefinitionUtils.createDefinition(device, definitionOptions);
     }
 }
 

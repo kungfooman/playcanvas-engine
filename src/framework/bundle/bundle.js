@@ -1,13 +1,18 @@
 import { EventHandler } from '../../core/event-handler.js';
 
 /**
- * Represents the resource of a Bundle Asset, which contains an index that maps URLs to DataViews.
+ * A Bundle is the resource of a `bundle` asset: an archive whose files back other assets. As the
+ * archive downloads, each file is indexed by its URL and announced with the `add` event, and
+ * `load` fires once the whole archive has arrived. When a file's URL is indexed by a bundle, the
+ * {@link ResourceLoader} reads it from the bundle through the {@link BundleRegistry} instead of
+ * fetching it from the network.
  *
  * @ignore
  */
 class Bundle extends EventHandler {
     /**
-     * Index of file url to to DataView.
+     * Index of file url to DataView.
+     *
      * @type {Map<string, DataView>}
      * @private
      */
@@ -15,7 +20,7 @@ class Bundle extends EventHandler {
 
     /**
      * If Bundle has all files loaded.
-     * @type {boolean}
+     *
      * @private
      */
     _loaded = false;
@@ -88,6 +93,7 @@ class Bundle extends EventHandler {
 
     /**
      * True if all files of a Bundle are loaded.
+     *
      * @type {boolean}
      */
     set loaded(value) {

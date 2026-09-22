@@ -1,6 +1,5 @@
 import { EventHandler } from '../../core/event-handler.js';
 import { math } from '../../core/math/math.js';
-import { hasAudioContext } from '../audio/capabilities.js';
 
 /**
  * @import { SoundManager } from './manager.js'
@@ -10,6 +9,10 @@ import { hasAudioContext } from '../audio/capabilities.js';
 const STATE_PLAYING = 0;
 const STATE_PAUSED = 1;
 const STATE_STOPPED = 2;
+
+// A scheduled stop cannot be cancelled through the Web Audio API, only replaced by a later one, so
+// an unwanted stop is pushed this many seconds into the future instead.
+const STOP_NEVER_DELAY = 1e6;
 
 /**
  * Return time % duration but always return a number instead of NaN when duration is 0.
@@ -25,6 +28,20 @@ function capTime(time, duration) {
 /**
  * A SoundInstance plays a {@link Sound}.
  *
+ * One instance is one playback. It wraps an `AudioBufferSourceNode`, available as {@link source}
+ * once playing, with a gain for {@link volume}, and carries {@link pitch}, {@link loop},
+ * {@link startTime} and {@link duration} to select the region of the sound it plays. {@link play},
+ * {@link pause}, {@link resume} and {@link stop} drive it and fire the events of the same names,
+ * with `end` fired when playback finishes on its own; {@link isPlaying}, {@link isPaused} and
+ * {@link isStopped} report the state, and {@link currentTime} can be read or set to seek.
+ * Instances are normally created by {@link SoundSlot#play} on a {@link SoundComponent}, which
+ * returns the instance so a script can adjust or stop that one playback. {@link setExternalNodes}
+ * inserts Web Audio nodes such as filters between the source and the destination.
+ *
+ * @example
+ * const instance = entity.sound.play('engine');
+ * instance.pitch = 1.5;
+ * instance.once('end', () => console.log('finished'));
  * @category Sound
  */
 class SoundInstance extends EventHandler {
@@ -84,11 +101,9 @@ class SoundInstance extends EventHandler {
     static EVENT_END = 'end';
 
     /**
-     * Gets the source that plays the sound resource. If the Web Audio API is not supported the
-     * type of source is [Audio](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/audio).
-     * Source is only available after calling play.
+     * Gets the source that plays the sound resource. Source is only available after calling play.
      *
-     * @type {AudioBufferSourceNode}
+     * @type {AudioBufferSourceNode|null}
      */
     source = null;
 
@@ -133,10 +148,7 @@ class SoundInstance extends EventHandler {
          */
         this._pitch = options.pitch !== undefined ? Math.max(0.01, Number(options.pitch) || 0) : 1;
 
-        /**
-         * @type {boolean}
-         * @private
-         */
+        /** @private */
         this._loop = !!(options.loop !== undefined ? options.loop : false);
 
         /**
@@ -156,7 +168,6 @@ class SoundInstance extends EventHandler {
         /**
          * True if the manager was suspended.
          *
-         * @type {boolean}
          * @private
          */
         this._suspended = false;
@@ -166,7 +177,6 @@ class SoundInstance extends EventHandler {
          * When an 'onended' event is suspended, this counter is decremented by 1.
          * When a future 'onended' event is to be suspended, this counter is incremented by 1.
          *
-         * @type {number}
          * @private
          */
         this._suspendEndEvent = 0;
@@ -174,7 +184,6 @@ class SoundInstance extends EventHandler {
         /**
          * True if we want to suspend firing instance events.
          *
-         * @type {boolean}
          * @private
          */
         this._suspendInstanceEvents = false;
@@ -182,21 +191,14 @@ class SoundInstance extends EventHandler {
         /**
          * If true then the instance will start playing its source when its created.
          *
-         * @type {boolean}
          * @private
          */
         this._playWhenLoaded = true;
 
-        /**
-         * @type {number}
-         * @private
-         */
+        /** @private */
         this._startTime = Math.max(0, Number(options.startTime) || 0);
 
-        /**
-         * @type {number}
-         * @private
-         */
+        /** @private */
         this._duration = Math.max(0, Number(options.duration) || 0);
 
         /**
@@ -217,97 +219,118 @@ class SoundInstance extends EventHandler {
         /** @private */
         this._onEndCallback = options.onEnd;
 
-        if (hasAudioContext()) {
-            /**
-             * @type {number}
-             * @private
-             */
-            this._startedAt = 0;
+        /** @private */
+        this._startedAt = 0;
 
-            /**
-             * Manually keep track of the playback position because the Web Audio API does not
-             * provide a way to do this accurately if the playbackRate is not 1.
-             *
-             * @type {number}
-             * @private
-             */
-            this._currentTime = 0;
+        /**
+         * Manually keep track of the playback position because the Web Audio API does not
+         * provide a way to do this accurately if the playbackRate is not 1.
+         *
+         * @private
+         */
+        this._currentTime = 0;
 
-            /**
-             * @type {number}
-             * @private
-             */
-            this._currentOffset = 0;
+        /**
+         * The playback position relative to startTime when _startedAt was recorded.
+         *
+         * @private
+         */
+        this._currentOffset = 0;
 
-            /**
-             * The input node is the one that is connected to the source.
-             *
-             * @type {AudioNode|null}
-             * @private
-             */
-            this._inputNode = null;
+        /**
+         * The offset into the buffer, in seconds, that the source was playing at when the position
+         * tracking used by the loop region was last brought up to date.
+         *
+         * @private
+         */
+        this._sourceOffset = 0;
 
-            /**
-             * The connected node is the one that is connected to the destination (speakers). Any
-             * external nodes will be connected to this node.
-             *
-             * @type {AudioNode|null}
-             * @private
-             */
-            this._connectorNode = null;
+        /**
+         * The context time that _sourceOffset was recorded at.
+         *
+         * @private
+         */
+        this._sourceOffsetAt = 0;
 
-            /**
-             * The first external node set by a user.
-             *
-             * @type {AudioNode|null}
-             * @private
-             */
-            this._firstNode = null;
+        /**
+         * Whether the source has been looping since _sourceOffset was recorded.
+         *
+         * @private
+         */
+        this._sourceLooping = false;
 
-            /**
-             * The last external node set by a user.
-             *
-             * @type {AudioNode|null}
-             * @private
-             */
-            this._lastNode = null;
+        /**
+         * Whether a stop at the end of the loop region is currently scheduled on the source.
+         *
+         * @private
+         */
+        this._regionStopPending = false;
 
-            /**
-             * Set to true if a play() request was issued when the AudioContext was still suspended,
-             * and will therefore wait until it is resumed to play the audio.
-             *
-             * @type {boolean}
-             * @private
-             */
-            this._waitingContextSuspension = false;
+        /**
+         * The input node is the one that is connected to the source.
+         *
+         * @type {AudioNode|null}
+         * @private
+         */
+        this._inputNode = null;
 
-            this._initializeNodes();
+        /**
+         * The connected node is the one that is connected to the destination (speakers). Any
+         * external nodes will be connected to this node.
+         *
+         * @type {AudioNode|null}
+         * @private
+         */
+        this._connectorNode = null;
 
-            /** @private */
-            this._endedHandler = this._onEnded.bind(this);
-        } else {
-            /** @private */
-            this._isReady = false;
+        /**
+         * The first external node set by a user.
+         *
+         * @type {AudioNode|null}
+         * @private
+         */
+        this._firstNode = null;
 
-            /** @private */
-            this._loadedMetadataHandler = this._onLoadedMetadata.bind(this);
-            /** @private */
-            this._timeUpdateHandler = this._onTimeUpdate.bind(this);
-            /** @private */
-            this._endedHandler = this._onEnded.bind(this);
+        /**
+         * The last external node set by a user.
+         *
+         * @type {AudioNode|null}
+         * @private
+         */
+        this._lastNode = null;
 
-            this._createSource();
+        /**
+         * Set to true if a play() request was issued when the AudioContext was still suspended,
+         * and will therefore wait until it is resumed to play the audio.
+         *
+         * @private
+         */
+        this._waitingContextSuspension = false;
+
+        // Web Audio is unavailable - leave the instance inert. play()/setExternalNodes()/etc.
+        // will become no-ops.
+        if (!this._manager.context) {
+            return;
         }
+
+        this._initializeNodes();
+
+        /** @private */
+        this._endedHandler = this._onEnded.bind(this);
     }
 
     /**
-     * Sets the current time of the sound that is playing. If the value provided is bigger than the
-     * duration of the instance it will wrap from the beginning.
+     * Sets the current time of the sound that is playing, relative to {@link startTime}. If the
+     * value provided is bigger than the duration of the instance it will wrap from the beginning.
      *
      * @type {number}
      */
     set currentTime(value) {
+        value = Number(value) || 0;
         if (value < 0) return;
+
+        const duration = this.duration;
+        const currentTime = duration ? capTime(value, duration) : value;
 
         if (this._state === STATE_PLAYING) {
             const suspend = this._suspendInstanceEvents;
@@ -317,19 +340,19 @@ class SoundInstance extends EventHandler {
             this.stop();
 
             // set _startOffset and play
-            this._startOffset = value;
+            this._startOffset = currentTime;
             this.play();
             this._suspendInstanceEvents = suspend;
         } else {
             // set _startOffset which will be used when the instance will start playing
-            this._startOffset = value;
+            this._startOffset = currentTime;
             // set _currentTime
-            this._currentTime = value;
+            this._currentTime = currentTime;
         }
     }
 
     /**
-     * Gets the current time of the sound that is playing.
+     * Gets the current time of the sound that is playing, relative to {@link startTime}.
      *
      * @type {number}
      */
@@ -374,7 +397,8 @@ class SoundInstance extends EventHandler {
     }
 
     /**
-     * Gets the duration of the sound that the instance will play starting from startTime.
+     * Gets the duration of the sound that the instance will play starting from {@link startTime}.
+     * The returned value is clamped to the time available after the normalized start time.
      *
      * @type {number}
      */
@@ -383,7 +407,9 @@ class SoundInstance extends EventHandler {
             return 0;
         }
         if (this._duration) {
-            return capTime(this._duration, this._sound.duration);
+            const soundDuration = this._sound.duration;
+            const startTime = capTime(this._startTime, soundDuration);
+            return Math.min(this._duration, soundDuration - startTime);
         }
         return this._sound.duration;
     }
@@ -430,9 +456,18 @@ class SoundInstance extends EventHandler {
      * @type {boolean}
      */
     set loop(value) {
-        this._loop = !!value;
+        const loop = !!value;
+        const wasLooping = this._loop;
+        this._loop = loop;
+
         if (this.source) {
-            this.source.loop = this._loop;
+            this.source.loop = loop;
+
+            // the duration is not passed to the source for looping instances, so the end of the
+            // loop region has to be scheduled (and unscheduled) manually as looping is toggled
+            if (wasLooping !== loop && this._duration && this._state === STATE_PLAYING) {
+                this._updateRegionStop();
+            }
         }
     }
 
@@ -454,12 +489,24 @@ class SoundInstance extends EventHandler {
         // set offset to current time so that
         // we calculate the rest of the time with the new pitch
         // from now on
-        this._currentOffset = this.currentTime;
-        this._startedAt = this._manager.context.currentTime;
+        if (this._manager.context) {
+            this._currentOffset = this.currentTime;
+            this._startedAt = this._manager.context.currentTime;
+
+            // bring the tracked source position up to date while _pitch is still the old rate
+            if (this.source) {
+                this._syncSourcePosition();
+            }
+        }
 
         this._pitch = Math.max(Number(pitch) || 0, 0.01);
         if (this.source) {
             this.source.playbackRate.value = this._pitch;
+
+            // a pending stop was scheduled in context time using the old rate
+            if (this._regionStopPending) {
+                this._updateRegionStop();
+            }
         }
     }
 
@@ -653,6 +700,11 @@ class SoundInstance extends EventHandler {
      * @returns {boolean} True if the sound was started immediately.
      */
     play() {
+        // No audio context - the instance is inert.
+        if (!this._manager.context) {
+            return false;
+        }
+
         if (this._state !== STATE_STOPPED) {
             this.stop();
         }
@@ -697,23 +749,19 @@ class SoundInstance extends EventHandler {
             this._createSource();
         }
 
-        // calculate start offset
-        let offset = capTime(this._startOffset, this.duration);
-        offset = capTime(this._startTime + offset, this._sound.duration);
+        // calculate the current offset relative to startTime and its matching buffer offset
+        const currentOffset = capTime(this._startOffset, this.duration);
+        const offset = capTime(this._startTime + currentOffset, this._sound.duration);
         // reset start offset now that we started the sound
         this._startOffset = null;
 
-        // start source with specified offset and duration
-        if (this._duration) {
-            this.source.start(0, offset, this._duration);
-        } else {
-            this.source.start(0, offset);
-        }
+        // start source with specified offset
+        this._startSource(offset, currentOffset);
 
         // reset times
         this._startedAt = this._manager.context.currentTime;
         this._currentTime = 0;
-        this._currentOffset = offset;
+        this._currentOffset = currentOffset;
 
         // Initialize volume and loop - note moved to be after start() because of Chrome bug
         this.volume = this._volume;
@@ -729,6 +777,87 @@ class SoundInstance extends EventHandler {
         if (!this._suspendInstanceEvents) {
             this._onPlay();
         }
+    }
+
+    /**
+     * Starts the source at the specified offset into the buffer.
+     *
+     * The duration is only passed to the source for non-looping instances. For a looping instance,
+     * the region to play is defined by loopStart/loopEnd - passing a duration as well would stop
+     * playback at the end of the first iteration instead of looping.
+     *
+     * @param {number} offset - The offset into the buffer, in seconds, to start playing from.
+     * @param {number} currentOffset - The offset relative to startTime, in seconds.
+     * @private
+     */
+    _startSource(offset, currentOffset) {
+        if (this._duration && !this._loop) {
+            this.source.start(0, offset, this.duration - currentOffset);
+        } else {
+            this.source.start(0, offset);
+        }
+
+        this._sourceOffset = offset;
+        this._sourceOffsetAt = this._manager.context.currentTime;
+        this._sourceLooping = this._loop;
+        this._regionStopPending = false;
+    }
+
+    /**
+     * Brings the tracked source position up to date and returns the offset into the buffer, in
+     * seconds, that the source is currently playing at. Tracked separately from _currentTime
+     * because that is capped to the duration of the instance rather than the buffer.
+     *
+     * @returns {number} The offset into the buffer, in seconds.
+     * @private
+     */
+    _syncSourcePosition() {
+        const source = this.source;
+        const context = this._manager.context;
+
+        let position = this._sourceOffset + (context.currentTime - this._sourceOffsetAt) * this._pitch;
+
+        // a source that has been looping has wrapped around the loop region
+        const region = source.loopEnd - source.loopStart;
+        if (this._sourceLooping && region > 0 && position > source.loopEnd) {
+            position = source.loopStart + ((position - source.loopStart) % region);
+        }
+
+        this._sourceOffset = position;
+        this._sourceOffsetAt = context.currentTime;
+        this._sourceLooping = source.loop;
+
+        return position;
+    }
+
+    /**
+     * Schedules, reschedules or unschedules the stop that ends the loop region. A looping source is
+     * started without a duration, so when looping is disabled the end of the current iteration has
+     * to be scheduled manually - and that deadline is in context time, so it has to be revisited
+     * whenever looping or the pitch changes.
+     *
+     * @private
+     */
+    _updateRegionStop() {
+        const source = this.source;
+        const context = this._manager.context;
+        const position = this._syncSourcePosition();
+
+        if (this._loop) {
+            if (this._regionStopPending) {
+                source.stop(context.currentTime + STOP_NEVER_DELAY);
+                this._regionStopPending = false;
+            }
+            return;
+        }
+
+        const region = source.loopEnd - source.loopStart;
+        if (region <= 0) {
+            return;
+        }
+
+        source.stop(context.currentTime + Math.max(0, source.loopEnd - position) / this._pitch);
+        this._regionStopPending = true;
     }
 
     /**
@@ -781,8 +910,8 @@ class SoundInstance extends EventHandler {
             return false;
         }
 
-        // start at point where sound was paused
-        let offset = this.currentTime;
+        // start at the point relative to startTime where the sound was paused
+        let currentOffset = this.currentTime;
 
         // set state back to playing
         this._state = STATE_PLAYING;
@@ -799,22 +928,19 @@ class SoundInstance extends EventHandler {
         // if the user set the 'currentTime' property while the sound
         // was paused then use that as the offset instead
         if (this._startOffset !== null) {
-            offset = capTime(this._startOffset, this.duration);
-            offset = capTime(this._startTime + offset, this._sound.duration);
+            currentOffset = capTime(this._startOffset, this.duration);
 
             // reset offset
             this._startOffset = null;
         }
 
+        const offset = capTime(this._startTime + currentOffset, this._sound.duration);
+
         // start source
-        if (this._duration) {
-            this.source.start(0, offset, this._duration);
-        } else {
-            this.source.start(0, offset);
-        }
+        this._startSource(offset, currentOffset);
 
         this._startedAt = this._manager.context.currentTime;
-        this._currentOffset = offset;
+        this._currentOffset = currentOffset;
 
         // Initialize parameters
         this.volume = this._volume;
@@ -901,6 +1027,11 @@ class SoundInstance extends EventHandler {
             return;
         }
 
+        // inert instance - no Web Audio graph to wire into
+        if (!this._connectorNode) {
+            return;
+        }
+
         if (!lastNode) {
             lastNode = firstNode;
         }
@@ -939,9 +1070,14 @@ class SoundInstance extends EventHandler {
     }
 
     /**
-     * Clears any external nodes set by {@link SoundInstance#setExternalNodes}.
+     * Clears any external nodes set by {@link setExternalNodes}.
      */
     clearExternalNodes() {
+        // inert instance - nothing to disconnect
+        if (!this._connectorNode) {
+            return;
+        }
+
         const speakers = this._manager.context.destination;
 
         // break existing connections
@@ -960,10 +1096,10 @@ class SoundInstance extends EventHandler {
     }
 
     /**
-     * Gets any external nodes set by {@link SoundInstance#setExternalNodes}.
+     * Gets any external nodes set by {@link setExternalNodes}.
      *
      * @returns {AudioNode[]} Returns an array that contains the two nodes set by
-     * {@link SoundInstance#setExternalNodes}.
+     * {@link setExternalNodes}.
      */
     getExternalNodes() {
         return [this._firstNode, this._lastNode];
@@ -983,6 +1119,11 @@ class SoundInstance extends EventHandler {
 
         const context = this._manager.context;
 
+        // inert instance - no audio context available
+        if (!context) {
+            return null;
+        }
+
         if (this._sound.buffer) {
             this.source = context.createBufferSource();
             this.source.buffer = this._sound.buffer;
@@ -996,7 +1137,9 @@ class SoundInstance extends EventHandler {
             // set loopStart and loopEnd so that the source starts and ends at the correct user-set times
             this.source.loopStart = capTime(this._startTime, this.source.buffer.duration);
             if (this._duration) {
-                this.source.loopEnd = Math.max(this.source.loopStart, capTime(this._startTime + this._duration, this.source.buffer.duration));
+                // clamp instead of wrapping - a wrapped loopEnd can collapse onto loopStart, which
+                // the Web Audio API interprets as 'loop the whole buffer'
+                this.source.loopEnd = Math.min(this.source.loopStart + this._duration, this.source.buffer.duration);
             }
         }
 
@@ -1024,241 +1167,6 @@ class SoundInstance extends EventHandler {
             this.source = null;
         }
     }
-}
-
-if (!hasAudioContext()) {
-    Object.assign(SoundInstance.prototype, {
-        play: function () {
-            if (this._state !== STATE_STOPPED) {
-                this.stop();
-            }
-
-            if (!this.source) {
-                if (!this._createSource()) {
-                    return false;
-                }
-            }
-
-            this.volume = this._volume;
-            this.pitch = this._pitch;
-            this.loop = this._loop;
-
-            this.source.play();
-            this._state = STATE_PLAYING;
-            this._playWhenLoaded = false;
-
-            this._manager.on('volumechange', this._onManagerVolumeChange, this);
-            this._manager.on('suspend', this._onManagerSuspend, this);
-            this._manager.on('resume', this._onManagerResume, this);
-            this._manager.on('destroy', this._onManagerDestroy, this);
-
-            // suspend immediately if manager is suspended
-            if (this._manager.suspended) {
-                this._onManagerSuspend();
-            }
-
-            if (!this._suspendInstanceEvents) {
-                this._onPlay();
-            }
-
-            return true;
-
-        },
-
-        pause: function () {
-            if (!this.source || this._state !== STATE_PLAYING) {
-                return false;
-            }
-
-            this._suspendEndEvent++;
-            this.source.pause();
-            this._playWhenLoaded = false;
-            this._state = STATE_PAUSED;
-            this._startOffset = null;
-
-            if (!this._suspendInstanceEvents) {
-                this._onPause();
-            }
-
-            return true;
-        },
-
-        resume: function () {
-            if (!this.source || this._state !== STATE_PAUSED) {
-                return false;
-            }
-
-            this._state = STATE_PLAYING;
-            this._playWhenLoaded = false;
-            if (this.source.paused) {
-                this.source.play();
-
-                if (!this._suspendInstanceEvents) {
-                    this._onResume();
-                }
-            }
-
-            return true;
-        },
-
-        stop: function () {
-            if (!this.source || this._state === STATE_STOPPED) {
-                return false;
-            }
-
-            this._manager.off('volumechange', this._onManagerVolumeChange, this);
-            this._manager.off('suspend', this._onManagerSuspend, this);
-            this._manager.off('resume', this._onManagerResume, this);
-            this._manager.off('destroy', this._onManagerDestroy, this);
-
-            this._suspendEndEvent++;
-            this.source.pause();
-            this._playWhenLoaded = false;
-            this._state = STATE_STOPPED;
-            this._startOffset = null;
-
-            if (!this._suspendInstanceEvents) {
-                this._onStop();
-            }
-
-            return true;
-        },
-
-        setExternalNodes: function () {
-            // not supported
-        },
-
-        clearExternalNodes: function () {
-            // not supported
-        },
-
-        getExternalNodes: function () {
-            // not supported but return same type of result
-            return [null, null];
-        },
-
-        // Sets start time after loadedmetadata is fired which is required by most browsers
-        _onLoadedMetadata: function () {
-            this.source.removeEventListener('loadedmetadata', this._loadedMetadataHandler);
-
-            this._isReady = true;
-
-            // calculate start time for source
-            let offset = capTime(this._startOffset, this.duration);
-            offset = capTime(this._startTime + offset, this._sound.duration);
-            // reset currentTime
-            this._startOffset = null;
-
-            // set offset on source
-            this.source.currentTime = offset;
-        },
-
-        _createSource: function () {
-            if (this._sound && this._sound.audio) {
-
-                this._isReady = false;
-                this.source = this._sound.audio.cloneNode(true);
-
-                // set events
-                this.source.addEventListener('loadedmetadata', this._loadedMetadataHandler);
-                this.source.addEventListener('timeupdate', this._timeUpdateHandler);
-                this.source.onended = this._endedHandler;
-            }
-
-            return this.source;
-        },
-
-        // called every time the 'currentTime' is changed
-        _onTimeUpdate: function () {
-            if (!this._duration) {
-                return;
-            }
-
-            // if the currentTime passes the end then if looping go back to the beginning
-            // otherwise manually stop
-            if (this.source.currentTime > capTime(this._startTime + this._duration, this.source.duration)) {
-                if (this.loop) {
-                    this.source.currentTime = capTime(this._startTime, this.source.duration);
-                } else {
-                    // remove listener to prevent multiple calls
-                    this.source.removeEventListener('timeupdate', this._timeUpdateHandler);
-                    this.source.pause();
-
-                    // call this manually because it doesn't work in all browsers in this case
-                    this._onEnded();
-                }
-            }
-        },
-
-        _onManagerDestroy: function () {
-            if (this.source) {
-                this.source.pause();
-            }
-        }
-    });
-
-    Object.defineProperty(SoundInstance.prototype, 'volume', {
-        get: function () {
-            return this._volume;
-        },
-
-        set: function (volume) {
-            volume = math.clamp(volume, 0, 1);
-            this._volume = volume;
-            if (this.source) {
-                this.source.volume = volume * this._manager.volume;
-            }
-        }
-    });
-
-    Object.defineProperty(SoundInstance.prototype, 'pitch', {
-        get: function () {
-            return this._pitch;
-        },
-
-        set: function (pitch) {
-            this._pitch = Math.max(Number(pitch) || 0, 0.01);
-            if (this.source) {
-                this.source.playbackRate = this._pitch;
-            }
-        }
-    });
-
-    Object.defineProperty(SoundInstance.prototype, 'sound', {
-        get: function () {
-            return this._sound;
-        },
-
-        set: function (value) {
-            this.stop();
-            this._sound = value;
-        }
-    });
-
-
-    Object.defineProperty(SoundInstance.prototype, 'currentTime', {
-        get: function () {
-            if (this._startOffset !== null) {
-                return this._startOffset;
-            }
-
-            if (this._state === STATE_STOPPED || !this.source) {
-                return 0;
-            }
-
-            return this.source.currentTime - this._startTime;
-        },
-
-        set: function (value) {
-            if (value < 0) return;
-
-            this._startOffset = value;
-            if (this.source && this._isReady) {
-                this.source.currentTime = capTime(this._startTime + capTime(value, this.duration), this._sound.duration);
-                this._startOffset = null;
-            }
-        }
-    });
 }
 
 export { SoundInstance };

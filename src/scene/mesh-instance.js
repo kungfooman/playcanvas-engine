@@ -1,25 +1,30 @@
 import { Debug, DebugHelper } from '../core/debug.js';
 import { BoundingBox } from '../core/shape/bounding-box.js';
-import { BoundingSphere } from '../core/shape/bounding-sphere.js';
 import { BindGroup } from '../platform/graphics/bind-group.js';
 import { UniformBuffer } from '../platform/graphics/uniform-buffer.js';
+import { VertexBuffer } from '../platform/graphics/vertex-buffer.js';
+import { DrawCommands } from '../platform/graphics/draw-commands.js';
+import { indexFormatByteSize } from '../platform/graphics/constants.js';
 import {
     LAYER_WORLD,
     MASK_AFFECT_DYNAMIC, MASK_BAKE, MASK_AFFECT_LIGHTMAPPED,
     RENDERSTYLE_SOLID,
     SHADERDEF_UV0, SHADERDEF_UV1, SHADERDEF_VCOLOR, SHADERDEF_TANGENTS, SHADERDEF_NOSHADOW, SHADERDEF_SKIN,
     SHADERDEF_SCREENSPACE, SHADERDEF_MORPH_POSITION, SHADERDEF_MORPH_NORMAL, SHADERDEF_BATCH,
-    SHADERDEF_LM, SHADERDEF_DIRLM, SHADERDEF_LMAMBIENT, SHADERDEF_INSTANCING, SHADERDEF_MORPH_TEXTURE_BASED_INT
+    SHADERDEF_LM, SHADERDEF_DIRLM, SHADERDEF_LMAMBIENT, SHADERDEF_INSTANCING, SHADERDEF_MORPH_TEXTURE_BASED_INT,
+    SHADOW_CASCADE_ALL,
+    instanceLightmapUniformNames
 } from './constants.js';
 import { GraphNode } from './graph-node.js';
 import { getDefaultMaterial } from './materials/default-material.js';
+import { getMutatedOverrides, initMeshInstanceDebug, recordAppliedOverrides, warnMutatedOverrides } from './materials/material-debug.js';
 import { LightmapCache } from './graphics/lightmap-cache.js';
 import { DebugGraphics } from '../platform/graphics/debug-graphics.js';
 import { hash32Fnv1a } from '../core/hash.js';
 import { array } from '../core/array-utils.js';
+import { PickerId } from './picker-id.js';
 
 /**
- * @import { BindGroupFormat } from '../platform/graphics/bind-group-format.js'
  * @import { Camera } from './camera.js'
  * @import { GSplatInstance } from './gsplat/gsplat-instance.js'
  * @import { GraphicsDevice } from '../platform/graphics/graphics-device.js'
@@ -28,6 +33,19 @@ import { array } from '../core/array-utils.js';
  * @import { MorphInstance } from './morph-instance.js'
  * @import { CameraShaderParams } from './camera-shader-params.js'
  * @import { Scene } from './scene.js'
+ * @import { UniformFormat } from '../platform/graphics/uniform-buffer-format.js'
+ * @typedef {object} MeshInstanceParameter - A parameter of a mesh instance, overriding the value of
+ * the material for that instance.
+ * @property {string} name - The name of the uniform.
+ * @property {*} data - The value.
+ * @property {ScopeId|null} scopeId - The scope id, resolved on first use for scope parameters.
+ * @property {boolean} override - True when the uniform is stored in the material uniform buffer, so
+ * the parameter is applied through the mesh instance's copy of it rather than through the scope.
+ * @property {UniformFormat|null} uniformFormat - The format of the uniform in the material uniform
+ * buffer, resolved on first use for overrides.
+ * @property {number} textureSlot - The index of the texture slot of the material bind group the
+ * parameter overrides, or -1 when it does not override a texture of the material.
+ * @ignore
  * @import { ScopeId } from '../platform/graphics/scope-id.js'
  * @import { Shader } from '../platform/graphics/shader.js'
  * @import { SkinInstance } from './skin-instance.js'
@@ -35,19 +53,17 @@ import { array } from '../core/array-utils.js';
  * @import { Texture } from '../platform/graphics/texture.js'
  * @import { UniformBufferFormat } from '../platform/graphics/uniform-buffer-format.js'
  * @import { Vec3 } from '../core/math/vec3.js'
- * @import { VertexBuffer } from '../platform/graphics/vertex-buffer.js'
+ * @import { CameraComponent } from '../framework/components/camera/component.js';
  */
 
-let id = 0;
 const _tmpAabb = new BoundingBox();
 const _tempBoneAabb = new BoundingBox();
-const _tempSphere = new BoundingSphere();
 
 /** @type {Set<Mesh>} */
 const _meshSet = new Set();
 
 // internal array used to evaluate the hash for the shader instance
-const lookupHashes = new Uint32Array(4);
+const lookupHashes = new Uint32Array(5);
 
 /**
  * Internal data structure used to store data used by hardware instancing.
@@ -60,8 +76,6 @@ class InstancingData {
 
     /**
      * True if the vertex buffer is destroyed when the mesh instance is destroyed.
-     *
-     * @type {boolean}
      */
     _destroyVertexBuffer = false;
 
@@ -173,12 +187,92 @@ class ShaderInstance {
  * @param {MeshInstance} meshInstance - The mesh instance.
  * @param {Vec3} cameraPosition - The position of the camera.
  * @param {Vec3} cameraForward - The forward vector of the camera.
- * @returns {void}
+ * @returns {number} The sort distance for the mesh instance. Mesh instances are sorted by this
+ * value in ascending or descending order depending on the layer's sort mode.
  */
 
 /**
  * An instance of a {@link Mesh}. A single mesh can be referenced by many mesh instances that can
  * have different transforms and materials.
+ *
+ * A mesh instance is created from a {@link Mesh}, a {@link Material} and the {@link GraphNode}
+ * whose world transform places it, and it is drawn only once it belongs to a {@link Layer}.
+ * Components such as {@link RenderComponent} create mesh instances from their assets and add them
+ * to the layers in their `layers` list. A mesh instance you construct yourself is placed either
+ * by assigning it to {@link RenderComponent#meshInstances} or by adding it to a layer directly
+ * with {@link Layer#addMeshInstances}.
+ *
+ * Per-instance rendering state lives here rather than on the shared mesh or material:
+ * {@link visible}, {@link castShadow} and `receiveShadow`, {@link cull} for frustum culling,
+ * {@link drawOrder} for manual sorting, and {@link setParameter} for shader uniforms that override
+ * the material's. {@link aabb} is the world-space bounds derived from the mesh bounds and the
+ * node's transform, and can be assigned to override it.
+ *
+ * ### Instancing
+ *
+ * Hardware instancing lets the GPU draw many copies of the same geometry with a single draw call.
+ * Use {@link setInstancing} to attach a vertex buffer that holds per-instance data
+ * (for example a mat4 world-matrix for every instance). Set {@link instancingCount}
+ * to control how many instances are rendered. Passing `null` to {@link setInstancing}
+ * disables instancing once again.
+ *
+ * ```javascript
+ * // vb is a vertex buffer with one 4×4 matrix per instance
+ * meshInstance.setInstancing(vb);
+ * meshInstance.instancingCount = numInstances;
+ * ```
+ *
+ * The default matrix format, {@link VertexFormat.getDefaultInstancingFormat}, occupies the
+ * attribute locations of `TEXCOORD6` and `TEXCOORD7`. A material sampling those UV sets on an
+ * instanced mesh needs a custom instancing vertex format on other attributes, as shown by the
+ * instancing-custom example.
+ *
+ * **Examples**
+ *
+ * - {@link https://playcanvas.github.io/#graphics/instancing-basic graphics/instancing-basic}
+ * - {@link https://playcanvas.github.io/#graphics/instancing-custom graphics/instancing-custom}
+ *
+ * ### GPU-Driven Indirect Rendering (WebGPU Only)
+ *
+ * Instead of issuing draw calls from the CPU, parameters are written into a GPU
+ * storage buffer and executed via indirect draw commands. Allocate one or more slots with
+ * `GraphicsDevice.getIndirectDrawSlot(count)`, then bind the mesh instance to those slots:
+ *
+ * ```javascript
+ * const slot = app.graphicsDevice.getIndirectDrawSlot(count);
+ * meshInstance.setIndirect(null, slot, count); // first arg can be a CameraComponent or null
+ * ```
+ *
+ * **Example**
+ *
+ * - {@link https://playcanvas.github.io/#compute/indirect-draw compute/indirect-draw}
+ *
+ * ### Multi-draw
+ *
+ * Multi-draw lets the engine submit multiple sub-draws with a single API call. On WebGL2 this maps
+ * to the `WEBGL_multi_draw` extension; on WebGPU, to indirect multi-draw. Use {@link setMultiDraw}
+ * to allocate a {@link DrawCommands} container, fill it with sub-draws using
+ * {@link DrawCommands#add} and finalize with {@link DrawCommands#update} whenever the data changes.
+ *
+ * Support: {@link GraphicsDevice#supportsMultiDraw} is true on WebGPU and commonly true on WebGL2
+ * (high coverage). When not supported, the engine can still render by issuing a fast internal loop
+ * of single draws using the multi-draw data.
+ *
+ * ```javascript
+ * // two indexed sub-draws from a single mesh
+ * const cmd = meshInstance.setMultiDraw(null, 2);
+ * cmd.add(0, 36, 1, 0);
+ * cmd.add(1, 60, 1, 36);
+ * cmd.update(2);
+ * ```
+ *
+ * ### Precedence
+ *
+ * When draw commands (indirect or multi-draw, see {@link setIndirect} and {@link setMultiDraw})
+ * are bound, they are the source of truth for rendering: the number of draws and the per-draw
+ * instance counts come from the draw commands, and {@link instancingCount} is ignored. In this
+ * case setting {@link instancingCount} to 0 does not skip rendering. {@link instancingCount} only
+ * takes effect for plain hardware instancing, when no draw commands are bound.
  *
  * @category Graphics
  */
@@ -188,16 +282,22 @@ class MeshInstance {
      * casting without overhead of removing from scene. Note that this property does not add the
      * mesh instance to appropriate list of shadow casters on a {@link Layer}, but allows mesh to
      * be skipped from shadow casting while it is in the list already. Defaults to false.
-     *
-     * @type {boolean}
      */
     castShadow = false;
 
     /**
+     * Specifies a bitmask that controls which shadow cascades a mesh instance contributes
+     * to when rendered with a {@link LIGHTTYPE_DIRECTIONAL} light source.
+     * This setting is only effective if the {@link castShadow} property is enabled.
+     * Defaults to {@link SHADOW_CASCADE_ALL}, which means the mesh casts shadows into all available cascades.
+     *
+     * @type {number}
+     */
+    shadowCascadeMask = SHADOW_CASCADE_ALL;
+
+    /**
      * Controls whether the mesh instance can be culled by frustum culling (see
      * {@link CameraComponent#frustumCulling}). Defaults to true.
-     *
-     * @type {boolean}
      */
     cull = true;
 
@@ -205,15 +305,10 @@ class MeshInstance {
      * Determines the rendering order of mesh instances. Only used when mesh instances are added to
      * a {@link Layer} with {@link Layer#opaqueSortMode} or {@link Layer#transparentSortMode}
      * (depending on the material) set to {@link SORTMODE_MANUAL}.
-     *
-     * @type {number}
      */
     drawOrder = 0;
 
-    /**
-     * @type {number}
-     * @ignore
-     */
+    /** @ignore */
     _drawBucket = 127;
 
     /**
@@ -227,23 +322,48 @@ class MeshInstance {
      * Enable rendering for this mesh instance. Use visible property to enable/disable rendering
      * without overhead of removing from scene. But note that the mesh instance is still in the
      * hierarchy and still in the draw call list.
-     *
-     * @type {boolean}
      */
     visible = true;
 
     /**
-     * Read this value in {@link Scene.EVENT_POSTCULL} event to determine if the object is actually going
-     * to be rendered.
+     * A bitmask controlling which shader passes this mesh instance is rendered in. Bit N
+     * corresponds to the shader pass with index N: the built-in forward pass is
+     * {@link SHADER_FORWARD}, and indices for custom shader passes are obtained from
+     * {@link CameraComponent#setShaderPass}. Defaults to `0xFFFFFFFF` (all passes). For example,
+     * clearing the forward pass bit keeps the mesh in the other passes (such as the camera depth
+     * prepass that feeds Depth of Field) while making it invisible in the rendered color image.
      *
-     * @type {boolean}
+     * @type {number}
+     * @example
+     * // clear the forward (color) pass bit, leaving all other pass bits set: the mesh is no longer
+     * // drawn in the color image, but still takes part in the other passes (such as the prepass)
+     * meshInstance.shaderPassMask &= ~(1 << SHADER_FORWARD);
+     * @example
+     * // set the forward (color) pass bit, leaving all other pass bits unchanged
+     * meshInstance.shaderPassMask |= (1 << SHADER_FORWARD);
+     * @example
+     * // exclude the mesh from a custom shader pass set up on the camera (see
+     * // CameraComponent#setShaderPass), leaving all other pass bits set
+     * const customPass = cameraComponent.setShaderPass('custom_rendering');
+     * meshInstance.shaderPassMask &= ~(1 << customPass);
+     * @example
+     * // test whether the forward (color) pass bit is set
+     * const forwardBitSet = (meshInstance.shaderPassMask & (1 << SHADER_FORWARD)) !== 0;
+     * @example
+     * // set every pass bit (the default value)
+     * meshInstance.shaderPassMask = 0xFFFFFFFF;
+     */
+    shaderPassMask = 0xFFFFFFFF;
+
+    /**
+     * Read this value in the {@link Scene.EVENT_POSTCULL} event to determine if the object is
+     * actually going to be rendered.
      */
     visibleThisFrame = false;
 
     /**
      * Negative scale batching support.
      *
-     * @type {number}
      * @ignore
      */
     flipFacesFactor = 1;
@@ -255,7 +375,7 @@ class MeshInstance {
     gsplatInstance = null;
 
     /** @ignore */
-    id = id++;
+    id = PickerId.get();
 
     /**
      * Custom function used to customize culling (e.g. for 2D UI elements).
@@ -272,15 +392,113 @@ class MeshInstance {
     instancingData = null;
 
     /**
-     * @type {Record<string, {scopeId: ScopeId|null, data: any, passFlags: number}>}
+     * Map of {@link Camera#id} to the draw commands bound to that camera, with the null key
+     * holding the commands shared by all cameras. Lazily allocated. Keyed by id rather than by
+     * camera so a long-lived mesh instance cannot retain a camera, and with it the camera's node
+     * hierarchy and render target.
+     *
+     * @type {Map<number|null, DrawCommands>|null}
      * @ignore
      */
-    parameters = {};
+    drawCommands = null;
+
+    /**
+     * Stores mesh metadata used for indirect rendering. Lazily allocated on first access
+     * via getIndirectMetaData().
+     *
+     * @type {Int32Array|null}
+     * @ignore
+     */
+    meshMetaData = null;
+
+    /**
+     * The parameters overriding the material values for this mesh instance, by name. A parameter
+     * naming the uniform of a typed material property is applied through a per-instance copy of the
+     * material uniform buffer (an override), any other parameter is set on the scope before the
+     * draw. The two groups are also kept in dense lists for the render loop.
+     *
+     * @type {Map<string, MeshInstanceParameter>}
+     * @ignore
+     */
+    parameters = new Map();
+
+    /**
+     * The parameters set on the scope before the draw.
+     *
+     * @type {MeshInstanceParameter[]}
+     * @private
+     */
+    _scopeParameters = [];
+
+    /**
+     * The parameters overriding uniforms of the material uniform buffer.
+     *
+     * @type {MeshInstanceParameter[]}
+     * @private
+     */
+    _materialOverrides = [];
+
+    /**
+     * The parameters overriding textures of the material bind group.
+     *
+     * @type {MeshInstanceParameter[]}
+     * @private
+     */
+    _materialTextureOverrides = [];
+
+    /**
+     * The layout version of the material the parameters were last split against, see
+     * {@link Material#layoutVersion}.
+     *
+     * @type {number}
+     * @private
+     */
+    _materialLayoutVersion = -1;
+
+    /**
+     * Incremented when an override of the material uniform buffer is added, removed or changed.
+     *
+     * @type {number}
+     * @private
+     */
+    _materialOverridesVersion = 0;
+
+    /**
+     * The per-instance copy of the material uniform buffer with the overrides applied, created on
+     * first use, or null.
+     *
+     * @type {UniformBuffer|null}
+     * @private
+     */
+    _materialUniformBuffer = null;
+
+    /**
+     * The bind group holding {@link MeshInstance#_materialUniformBuffer}.
+     *
+     * @type {BindGroup|null}
+     * @private
+     */
+    _materialBindGroup = null;
+
+    /**
+     * The material uniform data version the copy was last synchronized with.
+     *
+     * @type {number}
+     * @private
+     */
+    _syncedMaterialDataVersion = -1;
+
+    /**
+     * The overrides version the copy was last synchronized with.
+     *
+     * @type {number}
+     * @private
+     */
+    _syncedOverridesVersion = -1;
 
     /**
      * True if the mesh instance is pickable by the {@link Picker}. Defaults to true.
      *
-     * @type {boolean}
      * @ignore
      */
     pick = true;
@@ -392,7 +610,7 @@ class MeshInstance {
     _shaderCache = new Map();
 
     /**
-     * 2 byte toggles, 2 bytes light mask; Default value is no toggles and mask = pc.MASK_AFFECT_DYNAMIC
+     * 2 byte toggles, 2 bytes light mask; Default value is no toggles and mask = MASK_AFFECT_DYNAMIC
      *
      * @private
      */
@@ -414,12 +632,12 @@ class MeshInstance {
      * component is attached to.
      * @example
      * // Create a mesh instance pointing to a 1x1x1 'cube' mesh
-     * const mesh = pc.Mesh.fromGeometry(app.graphicsDevice, new pc.BoxGeometry());
-     * const material = new pc.StandardMaterial();
+     * const mesh = Mesh.fromGeometry(app.graphicsDevice, new BoxGeometry());
+     * const material = new StandardMaterial();
      *
-     * const meshInstance = new pc.MeshInstance(mesh, material);
+     * const meshInstance = new MeshInstance(mesh, material);
      *
-     * const entity = new pc.Entity();
+     * const entity = new Entity();
      * entity.addComponent('render', {
      *     meshInstances: [meshInstance]
      * });
@@ -429,6 +647,7 @@ class MeshInstance {
      */
     constructor(mesh, material, node = null) {
         Debug.assert(!(mesh instanceof GraphNode), 'Incorrect parameters for MeshInstance\'s constructor. Use new MeshInstance(mesh, material, node)');
+        Debug.call(() => initMeshInstanceDebug(this));
 
         this.node = node;           // The node that defines the transform of the mesh instance
         this._mesh = mesh;          // The mesh that this instance renders
@@ -437,8 +656,8 @@ class MeshInstance {
 
         if (mesh.vertexBuffer) {
             const format = mesh.vertexBuffer.format;
-            this._shaderDefs |= format.hasUv0 ? SHADERDEF_UV0 : 0;
-            this._shaderDefs |= format.hasUv1 ? SHADERDEF_UV1 : 0;
+            this._shaderDefs |= format.hasUv(0) ? SHADERDEF_UV0 : 0;
+            this._shaderDefs |= format.hasUv(1) ? SHADERDEF_UV1 : 0;
             this._shaderDefs |= format.hasColor ? SHADERDEF_VCOLOR : 0;
             this._shaderDefs |= format.hasTangents ? SHADERDEF_TANGENTS : 0;
         }
@@ -525,7 +744,7 @@ class MeshInstance {
     /**
      * Gets the graphics mesh being instanced.
      *
-     * @type {Mesh}
+     * @type {Mesh|null}
      */
     get mesh() {
         return this._mesh;
@@ -648,12 +867,11 @@ class MeshInstance {
      * @param {Scene} scene - The scene.
      * @param {CameraShaderParams} cameraShaderParams - The camera shader parameters.
      * @param {UniformBufferFormat} [viewUniformFormat] - The format of the view uniform buffer.
-     * @param {BindGroupFormat} [viewBindGroupFormat] - The format of the view bind group.
      * @param {any} [sortedLights] - Array of arrays of lights.
      * @returns {ShaderInstance} - the shader instance.
      * @ignore
      */
-    getShaderInstance(shaderPass, lightHash, scene, cameraShaderParams, viewUniformFormat, viewBindGroupFormat, sortedLights) {
+    getShaderInstance(shaderPass, lightHash, scene, cameraShaderParams, viewUniformFormat, sortedLights) {
 
         const shaderDefs = this._shaderDefs;
 
@@ -662,6 +880,9 @@ class MeshInstance {
         lookupHashes[1] = lightHash;
         lookupHashes[2] = shaderDefs;
         lookupHashes[3] = cameraShaderParams.hash;
+
+        // the uv sets the mesh provides decide which of the material's maps the shader samples
+        lookupHashes[4] = this.mesh.vertexBuffer?.format.uvMask ?? 0;
         const hash = hash32Fnv1a(lookupHashes);
 
         // look up the cache
@@ -691,7 +912,6 @@ class MeshInstance {
                     pass: shaderPass,
                     sortedLights: sortedLights,
                     viewUniformFormat: viewUniformFormat,
-                    viewBindGroupFormat: viewBindGroupFormat,
                     vertexFormat: this.mesh.vertexBuffer?.format
                 });
 
@@ -737,6 +957,9 @@ class MeshInstance {
 
         this._material = material;
 
+        // which parameters override the material uniform buffer depends on the material
+        this._rebuildParameterLists();
+
         if (material) {
 
             // Record that the material is referenced by this mesh instance
@@ -752,7 +975,7 @@ class MeshInstance {
     /**
      * Gets the material used by this mesh instance.
      *
-     * @type {Material}
+     * @type {Material|null}
      */
     get material() {
         return this._material;
@@ -882,8 +1105,9 @@ class MeshInstance {
     }
 
     /**
-     * Sets the mask controlling which {@link LightComponent}s light this mesh instance, which
-     * {@link CameraComponent} sees it and in which {@link Layer} it is rendered. Defaults to 1.
+     * Sets the light mask of this mesh instance: which {@link LightComponent}s light it. The value
+     * is a combination of `MASK_AFFECT_DYNAMIC`, `MASK_AFFECT_LIGHTMAPPED` and `MASK_BAKE`.
+     * Defaults to `MASK_AFFECT_DYNAMIC`.
      *
      * @type {number}
      */
@@ -893,8 +1117,7 @@ class MeshInstance {
     }
 
     /**
-     * Gets the mask controlling which {@link LightComponent}s light this mesh instance, which
-     * {@link CameraComponent} sees it and in which {@link Layer} it is rendered.
+     * Gets the light mask of this mesh instance: which {@link LightComponent}s light it.
      *
      * @type {number}
      */
@@ -948,14 +1171,27 @@ class MeshInstance {
 
         this.clearShaders();
 
+        this._destroyMaterialUniformBuffer();
+
         // make sure material clears references to this meshInstance
         this.material = null;
 
         this.instancingData?.destroy();
+
+        this.destroyDrawCommands();
     }
 
-    // shader uniform names for lightmaps
-    static lightmapParamNames = ['texture_lightMap', 'texture_dirLightMap'];
+    destroyDrawCommands() {
+        if (this.drawCommands) {
+            for (const cmd of this.drawCommands.values()) {
+                cmd?.destroy();
+            }
+            this.drawCommands = null;
+        }
+    }
+
+    // shader uniform names for the lightmaps of a mesh instance
+    static lightmapParamNames = instanceLightmapUniformNames;
 
     /**
      * Sets the render style for an array of mesh instances.
@@ -1001,10 +1237,8 @@ class MeshInstance {
                 return this.isVisibleFunc(camera);
             }
 
-            _tempSphere.center = this.aabb.center;  // this line evaluates aabb
-            _tempSphere.radius = this._aabb.halfExtents.length();
-
-            return camera.frustum.containsSphere(_tempSphere) > 0;
+            // note that reading aabb evaluates it
+            return camera.frustum.containsAabb(this.aabb);
         }
 
         return false;
@@ -1012,34 +1246,43 @@ class MeshInstance {
 
     updateKey() {
 
-        // 31      : sign bit (leave)
-        // 30 - 25 : 8 bits for draw bucket - this is the highest priority for sorting
-        // 24      : 1 bit for alpha test / coverage, to render them after opaque to keep GPU efficiency
-        // 23 - 0  : 24 bits for material ID
+        // 31      : sign bit (leave as 0)
+        // 30 - 23 : 8 bits for draw bucket - highest priority for sorting
+        // 22      : 1 bit for alpha test / coverage, to render them after opaque for GPU efficiency
+        // 21 - 0  : 22 bits for material ID
         const { material } = this;
         this._sortKeyForward =
-            (this._drawBucket << 25) |
-            ((material.alphaToCoverage || material.alphaTest) ? 0x1000000 : 0) |
-            (material.id & 0xffffff);
+            (this._drawBucket << 23) |
+            ((material.alphaToCoverage || material.alphaTest) ? 0x400000 : 0) |
+            (material.id & 0x3fffff);
     }
 
     /**
      * Sets up {@link MeshInstance} to be rendered using Hardware Instancing.
+     * Note that {@link instancingCount} is automatically set to the number of vertices of the
+     * vertex buffer when it is provided.
      *
-     * @param {VertexBuffer|null} vertexBuffer - Vertex buffer to hold per-instance vertex data
-     * (usually world matrices). Pass null to turn off hardware instancing.
+     * @param {VertexBuffer|true|null} vertexBuffer - Vertex buffer to hold per-instance vertex data
+     * (usually world matrices). Pass `true` to enable attributeless instancing where the instance
+     * index is derived from `gl_InstanceID` / `instance_index` builtins rather than a vertex
+     * buffer attribute — the caller must set {@link instancingCount} manually. Pass null to turn
+     * off hardware instancing.
      * @param {boolean} cull - Whether to perform frustum culling on this instance. If true, the whole
-     * instance will be culled by the  camera frustum. This often involves setting
+     * instance will be culled by the camera frustum. This often involves setting
      * {@link RenderComponent#customAabb} containing all instances. Defaults to false, which means
      * the whole instance is always rendered.
      */
     setInstancing(vertexBuffer, cull = false) {
         if (vertexBuffer) {
-            this.instancingData = new InstancingData(vertexBuffer.numVertices);
-            this.instancingData.vertexBuffer = vertexBuffer;
+            if (vertexBuffer === true) {
+                this.instancingData = new InstancingData(0);
+            } else {
+                this.instancingData = new InstancingData(vertexBuffer.numVertices);
+                this.instancingData.vertexBuffer = vertexBuffer;
 
-            // mark vertex buffer as instancing data
-            vertexBuffer.format.instancing = true;
+                // mark vertex buffer as instancing data
+                vertexBuffer.format.instancing = true;
+            }
 
             // set up culling
             this.cull = cull;
@@ -1048,7 +1291,159 @@ class MeshInstance {
             this.cull = true;
         }
 
-        this._updateShaderDefs(vertexBuffer ? (this._shaderDefs | SHADERDEF_INSTANCING) : (this._shaderDefs & ~SHADERDEF_INSTANCING));
+        this._updateShaderDefs(vertexBuffer instanceof VertexBuffer ?
+            (this._shaderDefs | SHADERDEF_INSTANCING) :
+            (this._shaderDefs & ~SHADERDEF_INSTANCING));
+    }
+
+    /**
+     * Sets the {@link MeshInstance} to be rendered using indirect rendering, where the GPU,
+     * typically using a Compute shader, stores draw call parameters in a buffer.
+     * Note that this is only supported on WebGPU (see
+     * {@link GraphicsDevice#supportsIndirectDraw}), and ignored on other platforms, where the
+     * mesh instance renders as a normal draw call.
+     *
+     * @param {CameraComponent|null} camera - Camera component to set indirect data for, or
+     * null if the indirect slot should be used for all cameras.
+     * @param {number} slot - Slot in the buffer to set the draw call parameters. Allocate a slot
+     * in the buffer by calling {@link GraphicsDevice#getIndirectDrawSlot}. Pass -1 to disable
+     * indirect rendering for the specified camera (or the shared entry when camera is null).
+     * @param {number} [count] - Optional number of consecutive slots to use. Defaults to 1.
+     */
+    setIndirect(camera, slot, count = 1) {
+        const key = camera?.camera.id ?? null;
+
+        // disable when slot is -1
+        if (slot === -1) {
+            this._deleteDrawCommandsKey(key);
+        } else if (this.mesh.device.supportsIndirectDraw) {
+            const cmd = this._allocDrawCommands(key, false);
+            cmd.slotIndex = slot;
+            cmd.update(count);
+
+            // the slot is recycled at the end of the frame, so the commands only apply to this
+            // frame - they need to be assigned again for the next one
+            cmd.validUntilVersion = this.mesh.device.drawCommandsVersion;
+        } else {
+            // ignored as documented - the backend cannot source draw parameters from a buffer, and
+            // draw commands it has no way to execute would take it down its multi-draw path
+            Debug.warnOnce('MeshInstance#setIndirect: indirect rendering is only supported on WebGPU, ignoring the call.');
+        }
+    }
+
+    /**
+     * Sets the {@link MeshInstance} to be rendered using multi-draw, where multiple sub-draws are
+     * executed with a single draw call.
+     *
+     * Note: Each call to this method invalidates any previously stored draw command data for the
+     * specified camera.
+     *
+     * @param {CameraComponent|null} camera - Camera component to bind commands to, or null to share
+     * across all cameras.
+     * @param {number} [maxCount] - Maximum number of sub-draws to allocate. Defaults to 1. Pass 0
+     * to disable multi-draw for the specified camera (or the shared entry when camera is null).
+     * @returns {DrawCommands|undefined} The commands container to populate with sub-draw commands.
+     */
+    setMultiDraw(camera, maxCount = 1) {
+        const key = camera?.camera.id ?? null;
+        let cmd;
+
+        // disable when maxCount is 0
+        if (maxCount === 0) {
+            this._deleteDrawCommandsKey(key);
+        } else {
+            cmd = this._allocDrawCommands(key, true);
+            cmd.allocate(maxCount);
+        }
+        return cmd;
+    }
+
+    /**
+     * Returns the cached draw commands for a key, allocating them when missing. A cached set of
+     * the other kind is released first - indirect and multi-draw commands draw from different
+     * backing storage, so they cannot share an instance.
+     *
+     * @param {number|null} key - The {@link Camera#id} the commands are bound to, or null for the
+     * set shared by all cameras.
+     * @param {boolean} multiDraw - True for multi-draw commands, false for indirect ones.
+     * @returns {DrawCommands} The draw commands to populate.
+     * @private
+     */
+    _allocDrawCommands(key, multiDraw) {
+
+        // lazy map allocation
+        const cmds = this.drawCommands ??= new Map();
+
+        let cmd = cmds.get(key);
+        if (cmd && cmd.multiDraw !== multiDraw) {
+            cmd.destroy();
+            cmd = undefined;
+        }
+
+        if (!cmd) {
+            // multi-draw on WebGL needs the index size of the current mesh index buffer
+            let indexSizeBytes = 0;
+            if (multiDraw) {
+                const indexFormat = this.mesh.indexBuffer?.[0]?.format;
+                indexSizeBytes = (indexFormat !== undefined) ? indexFormatByteSize[indexFormat] : 0;
+            }
+            cmd = new DrawCommands(this.mesh.device, indexSizeBytes);
+            cmd.multiDraw = multiDraw;
+            cmds.set(key, cmd);
+        }
+
+        return cmd;
+    }
+
+    _deleteDrawCommandsKey(key) {
+        const cmds = this.drawCommands;
+        if (cmds) {
+            const cmd = cmds.get(key);
+            cmd?.destroy();
+            cmds.delete(key);
+            if (cmds.size === 0) {
+                this.destroyDrawCommands();
+            }
+        }
+    }
+
+    /**
+     * Retrieves the draw commands for a specific camera, or the default commands when none are
+     * bound to that camera.
+     *
+     * @param {Camera} camera - The camera to retrieve commands for.
+     * @returns {DrawCommands|undefined} - The draw commands, or undefined.
+     * @ignore
+     */
+    getDrawCommands(camera) {
+        const cmds = this.drawCommands;
+        if (!cmds) return undefined;
+
+        // commands are cached for reuse, so expired ones are still in the map
+        const version = this.mesh.device.drawCommandsVersion;
+        const cmd = cmds.get(camera?.id);
+        if (cmd && version <= cmd.validUntilVersion) return cmd;
+        const shared = cmds.get(null);
+        return (shared && version <= shared.validUntilVersion) ? shared : undefined;
+    }
+
+    /**
+     * Retrieves the mesh metadata needed for indirect rendering.
+     *
+     * @returns {Int32Array} - A typed array with 4 elements representing the mesh metadata, which
+     * is typically needed when generating indirect draw call parameters using Compute shader. These
+     * can be provided to the Compute shader using vec4i uniform. The values are based on
+     * {@link Mesh#primitive}, stored in this order: [count, base, baseVertex, 0]. The last value is
+     * always zero and is reserved for future use.
+     */
+    getIndirectMetaData() {
+        const prim = this.mesh?.primitive[this.renderStyle];
+        const data = this.meshMetaData ?? (this.meshMetaData = new Int32Array(4));
+        data[0] = prim.count;
+        data[1] = prim.base;
+        data[2] = prim.baseVertex;
+        // data[3] is padding, can be used for first instance in the future
+        return data;
     }
 
     ensureMaterial(device) {
@@ -1060,7 +1455,11 @@ class MeshInstance {
 
     // Parameter management
     clearParameters() {
-        this.parameters = {};
+        this.parameters.clear();
+        this._scopeParameters.length = 0;
+        this._materialOverrides.length = 0;
+        this._materialTextureOverrides.length = 0;
+        this._materialOverridesVersion++;
     }
 
     getParameters() {
@@ -1071,33 +1470,49 @@ class MeshInstance {
      * Retrieves the specified shader parameter from a mesh instance.
      *
      * @param {string} name - The name of the parameter to query.
-     * @returns {object} The named parameter.
+     * @returns {object|undefined} The named parameter, or `undefined` if no parameter with that
+     * name is set on this mesh instance.
      */
     getParameter(name) {
-        return this.parameters[name];
+        return this.parameters.get(name);
     }
 
     /**
      * Sets a shader parameter on a mesh instance. Note that this parameter will take precedence
      * over parameter of the same name if set on Material this mesh instance uses for rendering.
+     * To change an array value, call this method again with it; the contents of an array are not
+     * guaranteed to be re-read on later draws.
      *
      * @param {string} name - The name of the parameter to set.
      * @param {number|number[]|Texture|Float32Array} data - The value for the specified parameter.
-     * @param {number} [passFlags] - Mask describing which passes the material should be included
-     * in. Defaults to 0xFFFFFFFF (all passes).
      */
-    setParameter(name, data, passFlags = 0xFFFFFFFF) {
+    setParameter(name, data) {
 
-        const param = this.parameters[name];
+        Debug.call(() => {
+            if (arguments[2] !== undefined) {
+                Debug.removed('MeshInstance#setParameter: the "passFlags" argument has been removed and is ignored.');
+            }
+        });
+
+        const param = this.parameters.get(name);
         if (param) {
             param.data = data;
-            param.passFlags = passFlags;
+
+            // a new value for an override of the material uniform buffer
+            if (param.override) {
+                this._materialOverridesVersion++;
+            }
         } else {
-            this.parameters[name] = {
-                scopeId: null,
+            const parameter = {
+                name: name,
                 data: data,
-                passFlags: passFlags
+                scopeId: null,
+                override: false,
+                uniformFormat: null,
+                textureSlot: -1
             };
+            this.parameters.set(name, parameter);
+            this._addParameter(parameter);
         }
     }
 
@@ -1136,30 +1551,190 @@ class MeshInstance {
      * @param {string} name - The name of the parameter to delete.
      */
     deleteParameter(name) {
-        if (this.parameters[name]) {
-            delete this.parameters[name];
+        const parameter = this.parameters.get(name);
+        if (parameter) {
+            this.parameters.delete(name);
+            const list = parameter.override ? this._materialOverrides :
+                (parameter.textureSlot >= 0 ? this._materialTextureOverrides : this._scopeParameters);
+            list.splice(list.indexOf(parameter), 1);
+            if (parameter.override) {
+                this._materialOverridesVersion++;
+            }
         }
     }
 
     /**
      * Used to apply parameters from this mesh instance into scope of uniforms, called internally
-     * by forward-renderer.
+     * by forward-renderer. Parameters overriding uniforms of the material uniform buffer are not
+     * part of this, they are applied by {@link MeshInstance#getMaterialBindGroup}.
      *
      * @param {GraphicsDevice} device - The graphics device.
-     * @param {number} passFlag - The pass flag for the current render pass.
      * @ignore
      */
-    setParameters(device, passFlag) {
-        const parameters = this.parameters;
-        for (const paramName in parameters) {
-            const parameter = parameters[paramName];
-            if (parameter.passFlags & passFlag) {
-                if (!parameter.scopeId) {
-                    parameter.scopeId = device.scope.resolve(paramName);
-                }
-                parameter.scopeId.setValue(parameter.data);
+    setParameters(device) {
+        const parameters = this._scopeParameters;
+        for (let i = 0; i < parameters.length; i++) {
+            const parameter = parameters[i];
+            if (!parameter.scopeId) {
+                parameter.scopeId = device.scope.resolve(parameter.name);
+            }
+            parameter.scopeId.setValue(parameter.data);
+        }
+    }
+
+    /**
+     * Adds a parameter to the scope list, or to the overrides of the material uniform buffer when
+     * its name is the uniform of a typed property of the material.
+     *
+     * @param {MeshInstanceParameter} parameter - The parameter.
+     * @private
+     */
+    _addParameter(parameter) {
+        const material = this._material;
+        parameter.override = !!material?.getUniformBufferProperty(parameter.name);
+        parameter.uniformFormat = null;
+
+        // a name which is not a uniform of the material buffer can still be one of its textures
+        parameter.textureSlot = parameter.override ? -1 : (material?.getTextureSlot(parameter.name) ?? -1);
+
+        if (parameter.override) {
+            this._materialOverrides.push(parameter);
+            this._materialOverridesVersion++;
+        } else if (parameter.textureSlot >= 0) {
+
+            // the copy of the bind group assigns the overriding textures on every draw, so there
+            // is no version for them to move
+            this._materialTextureOverrides.push(parameter);
+        } else {
+            this._scopeParameters.push(parameter);
+        }
+    }
+
+    /**
+     * Splits the parameters between the scope and the material uniform buffer again, after the
+     * material or its set of typed properties changed.
+     *
+     * @private
+     */
+    _rebuildParameterLists() {
+        this._scopeParameters.length = 0;
+        this._materialOverrides.length = 0;
+        this._materialTextureOverrides.length = 0;
+        for (const parameter of this.parameters.values()) {
+            this._addParameter(parameter);
+        }
+        this._materialLayoutVersion = this._material?.layoutVersion ?? -1;
+        this._materialOverridesVersion++;
+    }
+
+    /**
+     * Returns the bind group to use at the material bind group index for this mesh instance: a
+     * per-instance copy of the material's bind group with the overriding parameters applied, or
+     * null when no parameter overrides anything in it, in which case the material's own bind group
+     * is used. The copy of the uniform buffer is synchronized when the material data or the
+     * overrides changed; the textures are assigned every time, as they are only references.
+     *
+     * @param {GraphicsDevice} device - The graphics device.
+     * @returns {BindGroup|null} The bind group of the overriding copy, or null.
+     * @ignore
+     */
+    getMaterialBindGroup(device) {
+        const material = this._material;
+
+        // the set of typed properties of the material changed - split the parameters again
+        if (this._materialLayoutVersion !== material.layoutVersion) {
+            this._rebuildParameterLists();
+        }
+
+        const overrides = this._materialOverrides;
+        const textureOverrides = this._materialTextureOverrides;
+        const materialUniformBuffer = material.uniformBuffer;
+        if ((overrides.length === 0 && textureOverrides.length === 0) || !materialUniformBuffer) {
+            return null;
+        }
+
+        // the copy follows the layout of the material - both the format of its buffer and the
+        // format of its bind group, which can differ in its textures alone
+        const format = materialUniformBuffer.format;
+        const bindGroupFormat = material.uniformBufferBindGroup.format;
+        let uniformBuffer = this._materialUniformBuffer;
+        if (!uniformBuffer || uniformBuffer.format !== format || this._materialBindGroup.format !== bindGroupFormat) {
+            this._destroyMaterialUniformBuffer();
+            uniformBuffer = new UniformBuffer(device, format, true);
+            this._materialUniformBuffer = uniformBuffer;
+            this._materialBindGroup = new BindGroup(device, bindGroupFormat, uniformBuffer);
+            this._syncedMaterialDataVersion = -1;
+
+            // the uniform formats of the overrides belong to the previous layout
+            for (let i = 0; i < overrides.length; i++) {
+                overrides[i].uniformFormat = null;
             }
         }
+
+        Debug.assert(uniformBuffer.device === device, 'A mesh instance can only be rendered by the graphics device that created its material uniform buffer copy.', this);
+
+        Debug.call(() => {
+            // an override array changed in place is not applied until the next setParameter. When no
+            // setParameter moved the override version since the last synchronization, warn about such
+            // a change, and check nothing until a setParameter moves the version
+            if (this._syncedOverridesVersion === this._materialOverridesVersion &&
+                this._debugWarnedOverridesVersion !== this._materialOverridesVersion) {
+                const names = getMutatedOverrides(this, overrides);
+                if (names.length > 0) {
+                    this._debugWarnedOverridesVersion = this._materialOverridesVersion;
+                    warnMutatedOverrides(this, names);
+                }
+            }
+        });
+
+        if (this._syncedMaterialDataVersion !== material.uniformDataVersion || this._syncedOverridesVersion !== this._materialOverridesVersion) {
+            // the material values, with the overrides applied on top
+            uniformBuffer.storageFloat32.set(materialUniformBuffer.storageFloat32);
+            for (let i = 0; i < overrides.length; i++) {
+                const override = overrides[i];
+                override.uniformFormat ??= format.get(override.name);
+                Debug.assert(override.uniformFormat, `Uniform '${override.name}' is not part of the material uniform buffer.`, this);
+                uniformBuffer.setUniform(override.uniformFormat, override.data);
+            }
+            Debug.call(() => recordAppliedOverrides(this, overrides));
+            uniformBuffer.upload();
+            this._syncedMaterialDataVersion = material.uniformDataVersion;
+            this._syncedOverridesVersion = this._materialOverridesVersion;
+        }
+
+        // the textures of the material, with the overriding ones on top. Assigning a texture is
+        // comparing a reference, so there is nothing to gain from tracking a version for it, and
+        // the bind group is only rebuilt when one of them actually changed
+        const bindGroup = this._materialBindGroup;
+        const materialTextures = material.uniformBufferBindGroup.textures;
+        for (let i = 0; i < materialTextures.length; i++) {
+            const texture = materialTextures[i];
+            if (texture) {
+                bindGroup.setTextureAt(i, texture);
+            }
+        }
+
+        for (let i = 0; i < textureOverrides.length; i++) {
+            const override = textureOverrides[i];
+            bindGroup.setTextureAt(override.textureSlot, override.data);
+        }
+
+        // (re)built when dirty: on creation, which needs the uploaded buffer, and after a lost
+        // context. Its resources are assigned here, not taken from the scope
+        bindGroup.commit();
+        return bindGroup;
+    }
+
+    /**
+     * Releases the per-instance copy of the material uniform buffer.
+     *
+     * @private
+     */
+    _destroyMaterialUniformBuffer() {
+        this._materialBindGroup?.destroy();
+        this._materialBindGroup = null;
+        this._materialUniformBuffer?.destroy();
+        this._materialUniformBuffer = null;
     }
 
     /**

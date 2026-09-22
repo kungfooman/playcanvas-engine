@@ -1,18 +1,30 @@
 import { IndexedList } from '../../../core/indexed-list.js';
 import { Vec2 } from '../../../core/math/vec2.js';
-import { Component } from '../component.js';
 import { ComponentSystem } from '../system.js';
 import { ScreenComponent } from './component.js';
-import { ScreenComponentData } from './data.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
+ * @import { Entity } from '../../entity.js'
  */
 
-const _schema = ['enabled'];
+/**
+ * Options of the `screen` component accepted by {@link ScreenComponentSystem} that differ from the
+ * properties of {@link ScreenComponent}. Each replaces the same-named property of the options that
+ * {@link Entity#addComponent} derives from the component class; see
+ * {@link ComponentOptionsOverrides}.
+ *
+ * @typedef {object} ScreenComponentOptionsOverrides
+ * @property {Vec2 | number[]} [referenceResolution] - Same as
+ * {@link ScreenComponent#referenceResolution}, also accepting an `[width, height]` array.
+ * @property {Vec2 | number[]} [resolution] - Same as {@link ScreenComponent#resolution}, also
+ * accepting an `[width, height]` array.
+ * @ignore
+ */
 
 /**
- * Manages creation of {@link ScreenComponent}s.
+ * Manages the {@link ScreenComponent}s of an application. Reach it through `app.systems.screen`;
+ * components are created with {@link Entity#addComponent}, never by calling the system directly.
  *
  * @category User Interface
  */
@@ -29,9 +41,6 @@ class ScreenComponentSystem extends ComponentSystem {
         this.id = 'screen';
 
         this.ComponentType = ScreenComponent;
-        this.DataType = ScreenComponentData;
-
-        this.schema = _schema;
 
         this.windowResolution = new Vec2();
 
@@ -42,7 +51,7 @@ class ScreenComponentSystem extends ComponentSystem {
 
         this.app.systems.on('update', this._onUpdate, this);
 
-        this.on('beforeremove', this.onRemoveComponent, this);
+        this.on('beforeremove', this.onBeforeRemove, this);
     }
 
     initializeComponentData(component, data, properties) {
@@ -68,9 +77,27 @@ class ScreenComponentSystem extends ComponentSystem {
             component.referenceResolution = component._referenceResolution;
         }
 
+        // Update any existing element components in the hierarchy that don't have a screen yet.
+        // This handles cases where element components were added before the screen component.
+        this._updateDescendantElements(component.entity, component.entity);
+
         // queue up a draw order sync
         component.syncDrawOrder();
-        super.initializeComponentData(component, data, _schema);
+        super.initializeComponentData(component, data);
+    }
+
+    _updateDescendantElements(entity, screenEntity) {
+        const children = entity.children;
+        for (let i = 0; i < children.length; i++) {
+            const child = children[i];
+            if (child.element && !child.element.screen) {
+                child.element._updateScreen(screenEntity);
+            }
+            // Continue traversing unless this child has its own screen component
+            if (!child.screen) {
+                this._updateDescendantElements(child, screenEntity);
+            }
+        }
     }
 
     destroy() {
@@ -100,13 +127,15 @@ class ScreenComponentSystem extends ComponentSystem {
             enabled: screen.enabled,
             screenSpace: screen.screenSpace,
             scaleMode: screen.scaleMode,
+            scaleBlend: screen.scaleBlend,
+            priority: screen.priority,
             resolution: screen.resolution.clone(),
             referenceResolution: screen.referenceResolution.clone()
         });
     }
 
-    onRemoveComponent(entity, component) {
-        component.onRemove();
+    onBeforeRemove(entity, component) {
+        component.onBeforeRemove();
     }
 
     processDrawOrderSyncQueue() {
@@ -134,7 +163,5 @@ class ScreenComponentSystem extends ComponentSystem {
         }
     }
 }
-
-Component._buildAccessors(ScreenComponent.prototype, _schema);
 
 export { ScreenComponentSystem };

@@ -21,6 +21,7 @@ const SH_C0 = 0.28209479177387814;
 // iterator for accessing uncompressed splat data
 class SplatIterator {
     constructor(gsplatData, p, r, s, c) {
+        const activated = gsplatData.activated;
         const x = gsplatData.getProp('x');
         const y = gsplatData.getProp('y');
         const z = gsplatData.getProp('z');
@@ -66,7 +67,11 @@ class SplatIterator {
             }
 
             if (s) {
-                s.set(Math.exp(sx[i]), Math.exp(sy[i]), Math.exp(sz[i]));
+                if (activated) {
+                    s.set(sx[i], sy[i], sz[i]);
+                } else {
+                    s.set(Math.exp(sx[i]), Math.exp(sy[i]), Math.exp(sz[i]));
+                }
             }
 
             if (c) {
@@ -74,7 +79,7 @@ class SplatIterator {
                     0.5 + cr[i] * SH_C0,
                     0.5 + cg[i] * SH_C0,
                     0.5 + cb[i] * SH_C0,
-                    sigmoid(ca[i])
+                    activated ? ca[i] : sigmoid(ca[i])
                 );
             }
         };
@@ -99,11 +104,29 @@ class GSplatData {
     numSplats;
 
     /**
-     * @param {PlyElement[]} elements - The elements.
+     * File header comments.
+     *
+     * @type { string[] }
      */
-    constructor(elements) {
+    comments;
+
+    /**
+     * True when the splat data stores activated values: linear scale and post-sigmoid opacity
+     * (e.g. data sourced from the glTF KHR_gaussian_splatting extension). False when the data
+     * uses PLY conventions: log-space scale and pre-sigmoid opacity.
+     *
+     * @type {boolean}
+     */
+    activated = false;
+
+    /**
+     * @param {PlyElement[]} elements - The elements.
+     * @param {string[]} comments - File header comments.
+     */
+    constructor(elements, comments = []) {
         this.elements = elements;
         this.numSplats = this.getElement('vertex').count;
+        this.comments = comments;
     }
 
     /**
@@ -185,7 +208,7 @@ class GSplatData {
                 continue;
             }
 
-            const scaleVal = 2.0 * Math.exp(scale);
+            const scaleVal = 2.0 * (this.activated ? scale : Math.exp(scale));
 
             if (first) {
                 first = false;
@@ -250,18 +273,21 @@ class GSplatData {
     }
 
     /**
-     * @param {Float32Array} result - Array containing the centers.
+     * Returns a new Float32Array of centers (x, y, z per splat).
+     * @returns {Float32Array} Centers buffer
      */
-    getCenters(result) {
+    getCenters() {
         const x = this.getProp('x');
         const y = this.getProp('y');
         const z = this.getProp('z');
 
+        const result = new Float32Array(this.numSplats * 3);
         for (let i = 0; i < this.numSplats; ++i) {
             result[i * 3 + 0] = x[i];
             result[i * 3 + 1] = y[i];
             result[i * 3 + 2] = z[i];
         }
+        return result;
     }
 
     /**
@@ -294,7 +320,8 @@ class GSplatData {
                 continue;
             }
 
-            const weight = 1.0 / (1.0 + Math.exp(Math.max(sx[i], sy[i], sz[i])));
+            const maxScale = Math.max(sx[i], sy[i], sz[i]);
+            const weight = 1.0 / (1.0 + (this.activated ? maxScale : Math.exp(maxScale)));
             result.x += px * weight;
             result.y += py * weight;
             result.z += pz * weight;
@@ -392,9 +419,9 @@ class GSplatData {
 
         const codes = new Map();
         for (let i = 0; i < this.numSplats; i++) {
-            const ix = Math.floor((x[i] - minX) * sizeX);
-            const iy = Math.floor((y[i] - minY) * sizeY);
-            const iz = Math.floor((z[i] - minZ) * sizeZ);
+            const ix = Math.min(1023, Math.floor((x[i] - minX) * sizeX));
+            const iy = Math.min(1023, Math.floor((y[i] - minY) * sizeY));
+            const iz = Math.min(1023, Math.floor((z[i] - minZ) * sizeZ));
             const code = encodeMorton3(ix, iy, iz);
 
             const val = codes.get(code);

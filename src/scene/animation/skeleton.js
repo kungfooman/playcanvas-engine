@@ -34,13 +34,11 @@ class InterpolatedKey {
 /**
  * Represents a skeleton used to play animations.
  *
- * @category Animation
+ * @category Animation (Legacy)
  */
 class Skeleton {
     /**
      * Determines whether skeleton is looping its animation.
-     *
-     * @type {boolean}
      */
     looping = true;
 

@@ -8,16 +8,35 @@ import { StandardMaterial } from '../../../scene/materials/standard-material.js'
 import { ComponentSystem } from '../system.js';
 import { ELEMENTTYPE_IMAGE, ELEMENTTYPE_TEXT } from './constants.js';
 import { ElementComponent } from './component.js';
-import { ElementComponentData } from './data.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
+ * @import { Entity } from '../../entity.js'
  */
 
-const _schema = ['enabled'];
+/**
+ * Options of the `element` component accepted by {@link ElementComponentSystem} that differ from
+ * the properties of {@link ElementComponent}. Each replaces the same-named property of the options
+ * that {@link Entity#addComponent} derives from the component class; see
+ * {@link ComponentOptionsOverrides}.
+ *
+ * @typedef {object} ElementComponentOptionsOverrides
+ * @property {Vec4 | number[]} [anchor] - Same as {@link ElementComponent#anchor}, also accepting an
+ * `[x, y, z, w]` array.
+ * @property {number | null} [batchGroupId] - Same as {@link ElementComponent#batchGroupId}. `null`
+ * selects no batch group.
+ * @property {Color | number[]} [color] - Same as {@link ElementComponent#color}, also accepting an
+ * `[r, g, b]` array.
+ * @property {Vec4 | number[]} [margin] - Same as {@link ElementComponent#margin}, also accepting an
+ * `[x, y, z, w]` array.
+ * @property {Vec2 | number[]} [pivot] - Same as {@link ElementComponent#pivot}, also accepting an
+ * `[x, y]` array.
+ * @ignore
+ */
 
 /**
- * Manages creation of {@link ElementComponent}s.
+ * Manages the {@link ElementComponent}s of an application. Reach it through `app.systems.element`;
+ * components are created with {@link Entity#addComponent}, never by calling the system directly.
  *
  * @category User Interface
  */
@@ -34,9 +53,7 @@ class ElementComponentSystem extends ComponentSystem {
         this.id = 'element';
 
         this.ComponentType = ElementComponent;
-        this.DataType = ElementComponentData;
 
-        this.schema = _schema;
         this._unicodeConverter = null;
         this._rtlReorder = null;
 
@@ -76,7 +93,7 @@ class ElementComponentSystem extends ComponentSystem {
         this.defaultImageMaterials = [];
 
         this.on('add', this.onAddComponent, this);
-        this.on('beforeremove', this.onRemoveComponent, this);
+        this.on('beforeremove', this.onBeforeRemove, this);
     }
 
     destroy() {
@@ -237,6 +254,7 @@ class ElementComponentSystem extends ComponentSystem {
             if (data.lineHeight !== undefined) component.lineHeight = data.lineHeight;
             if (data.maxLines !== undefined) component.maxLines = data.maxLines;
             if (data.wrapLines !== undefined) component.wrapLines = data.wrapLines;
+            if (data.justify !== undefined) component.justify = data.justify;
             if (data.minFontSize !== undefined) component.minFontSize = data.minFontSize;
             if (data.maxFontSize !== undefined) component.maxFontSize = data.maxFontSize;
             if (data.autoFitWidth) component.autoFitWidth = data.autoFitWidth;
@@ -259,7 +277,8 @@ class ElementComponentSystem extends ComponentSystem {
             component._updateScreen(result.screen);
         }
 
-        super.initializeComponentData(component, data, properties);
+        // pass an empty properties list as the enabled state is initialized above
+        super.initializeComponentData(component, data, []);
 
         component._beingInitialized = false;
 
@@ -272,8 +291,8 @@ class ElementComponentSystem extends ComponentSystem {
         entity.fire('element:add');
     }
 
-    onRemoveComponent(entity, component) {
-        component.onRemove();
+    onBeforeRemove(entity, component) {
+        component.onBeforeRemove();
     }
 
     cloneComponent(entity, clone) {
@@ -306,6 +325,7 @@ class ElementComponentSystem extends ComponentSystem {
             spacing: source.spacing,
             lineHeight: source.lineHeight,
             wrapLines: source.wrapLines,
+            justify: source.justify,
             layers: source.layers,
             fontSize: source.fontSize,
             minFontSize: source.minFontSize,
@@ -349,6 +369,7 @@ class ElementComponentSystem extends ComponentSystem {
         let name = 'TextMaterial';
 
         material = new StandardMaterial();
+        material.setDefine('MESH_COLOR', true);
 
         if (msdf) {
             material.msdfMap = this._defaultTexture;
@@ -378,7 +399,6 @@ class ElementComponentSystem extends ComponentSystem {
         material.useFog = false;
         material.useSkybox = false;
         material.diffuse.set(0, 0, 0); // black diffuse color to prevent ambient light being included
-        material.opacity = 0.5;
         material.blendType = BLEND_PREMULTIPLIED;
         material.depthWrite = false;
         material.emissiveVertexColor = true;
@@ -391,6 +411,7 @@ class ElementComponentSystem extends ComponentSystem {
 
     _createBaseImageMaterial() {
         const material = new StandardMaterial();
+        material.setDefine('MESH_COLOR', true);
 
         material.diffuse.set(0, 0, 0); // black diffuse color to prevent ambient light being included
         material.emissive.set(1, 1, 1);

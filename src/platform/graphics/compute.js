@@ -5,6 +5,8 @@
  * @import { Shader } from './shader.js'
  * @import { StorageBuffer } from './storage-buffer.js'
  * @import { Texture } from './texture.js'
+ * @import { TextureView } from './texture-view.js'
+ * @import { Vec2 } from '../../core/math/vec2.js'
  * @import { VertexBuffer } from './vertex-buffer.js'
  */
 
@@ -23,6 +25,11 @@ class ComputeParameter {
 /**
  * A representation of a compute shader with the associated resources, that can be executed on the
  * GPU. Only supported on WebGPU platform.
+ *
+ * Call {@link Compute#destroy} when no longer needed. The graphics device retains compute
+ * instances for device recovery until they are explicitly destroyed.
+ *
+ * @category Graphics
  */
 class Compute {
     /**
@@ -46,10 +53,7 @@ class Compute {
      */
     parameters = new Map();
 
-    /**
-     * @type {number}
-     * @ignore
-     */
+    /** @ignore */
     countX = 1;
 
     /**
@@ -65,10 +69,33 @@ class Compute {
     countZ;
 
     /**
+     * Slot index in the indirect dispatch buffer, or -1 for direct dispatch.
+     *
+     * @ignore
+     */
+    indirectSlotIndex = -1;
+
+    /**
+     * Custom buffer for indirect dispatch, or null to use device's built-in buffer.
+     *
+     * @type {StorageBuffer|null}
+     * @ignore
+     */
+    indirectBuffer = null;
+
+    /**
+     * Frame stamp (device.renderVersion) when indirect slot was set. Used for validation
+     * when using the built-in buffer.
+     *
+     * @ignore
+     */
+    indirectFrameStamp = 0;
+
+    /**
      * Create a compute instance. Note that this is supported on WebGPU only and is a no-op on
      * other platforms.
      *
-     * @param {GraphicsDevice} graphicsDevice -
+     * @param {GraphicsDevice} graphicsDevice
      * The graphics device.
      * @param {Shader} shader - The compute shader.
      * @param {string} [name] - The name of the compute instance, used for debugging only.
@@ -87,7 +114,7 @@ class Compute {
      * Sets a shader parameter on a compute instance.
      *
      * @param {string} name - The name of the parameter to set.
-     * @param {number|number[]|Float32Array|Texture|StorageBuffer|VertexBuffer|IndexBuffer} value -
+     * @param {number|number[]|Float32Array|Texture|StorageBuffer|VertexBuffer|IndexBuffer|TextureView} value
      * The value for the specified parameter.
      */
     setParameter(name, value) {
@@ -104,7 +131,7 @@ class Compute {
      * Returns the value of a shader parameter from the compute instance.
      *
      * @param {string} name - The name of the parameter to get.
-     * @returns {number|number[]|Float32Array|Texture|StorageBuffer|VertexBuffer|IndexBuffer|undefined}
+     * @returns {number|number[]|Float32Array|Texture|StorageBuffer|VertexBuffer|IndexBuffer|TextureView|undefined}
      * The value of the specified parameter.
      */
     getParameter(name) {
@@ -118,6 +145,14 @@ class Compute {
      */
     deleteParameter(name) {
         this.parameters.delete(name);
+    }
+
+    /**
+     * Frees resources associated with this compute instance.
+     */
+    destroy() {
+        this.impl?.destroy();
+        this.impl = null;
     }
 
     /**
@@ -142,6 +177,62 @@ class Compute {
         this.countX = x;
         this.countY = y;
         this.countZ = z;
+
+        // reset indirect dispatch state
+        this.indirectSlotIndex = -1;
+        this.indirectBuffer = null;
+    }
+
+    /**
+     * Prepare the compute work dispatch to use indirect parameters from a buffer. The dispatch
+     * parameters (x, y, z workgroup counts) are read from the buffer at the specified slot index.
+     *
+     * When using the device's built-in buffer (buffer parameter is null), this method must be
+     * called each frame as slots are only valid for the current frame.
+     *
+     * @param {number} slotIndex - Slot index in the indirect dispatch buffer. When using the
+     * device's built-in buffer, obtain this by calling {@link GraphicsDevice#getIndirectDispatchSlot}.
+     * @param {StorageBuffer|null} [buffer] - Optional custom storage buffer containing dispatch
+     * parameters. If not provided, uses the device's built-in {@link GraphicsDevice#indirectDispatchBuffer}.
+     * When providing a custom buffer, the user is responsible for its lifetime and contents.
+     * @example
+     * // Reserve a slot in the indirect dispatch buffer
+     * const slot = device.getIndirectDispatchSlot();
+     *
+     * // First compute shader writes dispatch parameters to the buffer
+     * prepareCompute.setParameter('indirectBuffer', device.indirectDispatchBuffer);
+     * prepareCompute.setParameter('slot', slot);
+     * prepareCompute.setupDispatch(1, 1, 1);
+     * device.computeDispatch([prepareCompute]);
+     *
+     * // Second compute shader uses indirect dispatch
+     * processCompute.setupIndirectDispatch(slot);
+     * device.computeDispatch([processCompute]);
+     */
+    setupIndirectDispatch(slotIndex, buffer = null) {
+        this.indirectSlotIndex = slotIndex;
+        this.indirectBuffer = buffer;
+        this.indirectFrameStamp = this.device.renderVersion;
+    }
+
+    /**
+     * Calculate near-square 2D dispatch dimensions for a given workgroup count,
+     * respecting the WebGPU per-dimension limit. When the count fits within a single
+     * dimension, Y is 1. Otherwise, dimensions are chosen to be roughly square to
+     * minimize wasted padding threads.
+     *
+     * @param {number} count - Total number of workgroups needed.
+     * @param {Vec2} result - Output vector to receive X (x) and Y (y) dimensions.
+     * @param {number} [maxDimension] - Maximum workgroups per dimension.
+     * @returns {Vec2} The result vector with dimensions set.
+     * @ignore
+     */
+    static calcDispatchSize(count, result, maxDimension = 65535) {
+        if (count <= maxDimension) {
+            return result.set(count, 1);
+        }
+        const y = Math.ceil(count / maxDimension);
+        return result.set(Math.ceil(count / y), y);
     }
 }
 

@@ -1,4 +1,4 @@
-import { ADDRESS_CLAMP_TO_EDGE, FILTER_NEAREST, PIXELFORMAT_RGBA16F, PIXELFORMAT_RGBA32F, PIXELFORMAT_RGBA8, PIXELFORMAT_SRGBA8 } from '../../../platform/graphics/constants.js';
+import { PIXELFORMAT_RGBA16F, PIXELFORMAT_RGBA32F, PIXELFORMAT_RGBA8, PIXELFORMAT_SRGBA8 } from '../../../platform/graphics/constants.js';
 import { DebugGraphics } from '../../../platform/graphics/debug-graphics.js';
 import { RenderTarget } from '../../../platform/graphics/render-target.js';
 import { Texture } from '../../../platform/graphics/texture.js';
@@ -20,7 +20,10 @@ class PostEffectEntry {
 }
 
 /**
- * Used to manage multiple post effects for a camera.
+ * Used to manage multiple post effects for a camera. This is the legacy post-processing path. For
+ * new work use {@link CameraFrame}, which implements bloom, SSAO, depth of field, TAA, volumetric
+ * fog and tone mapping as one HDR pipeline; `playcanvas/scripts/esm/camera-frame.mjs` wraps it as
+ * an attachable script.
  *
  * @category Graphics
  */
@@ -56,7 +59,6 @@ class PostEffectQueue {
          * If the queue is enabled it will render all of its effects, otherwise it will not render
          * anything.
          *
-         * @type {boolean}
          * @ignore
          */
         this.enabled = false;
@@ -83,17 +85,7 @@ class PostEffectQueue {
         const width = Math.floor(rect.z * (renderTarget?.width ?? device.width));
         const height = Math.floor(rect.w * (renderTarget?.height ?? device.height));
 
-        const colorBuffer = new Texture(device, {
-            name: name,
-            format: format,
-            width: width,
-            height: height,
-            mipmaps: false,
-            minFilter: FILTER_NEAREST,
-            magFilter: FILTER_NEAREST,
-            addressU: ADDRESS_CLAMP_TO_EDGE,
-            addressV: ADDRESS_CLAMP_TO_EDGE
-        });
+        const colorBuffer = Texture.createDataTexture2D(device, name, width, height, format);
 
         return colorBuffer;
     }
@@ -136,6 +128,7 @@ class PostEffectQueue {
         rt.destroyTextureBuffers();
         rt._colorBuffer = this._allocateColorBuffer(format, name);
         rt._colorBuffers = [rt._colorBuffer];
+        rt.evaluateDimensions();
     }
 
     _destroyOffscreenTarget(rt) {

@@ -49,7 +49,7 @@ class XrInput extends EventHandler {
      *
      * @event
      * @example
-     * const ray = new pc.Ray();
+     * const ray = new Ray();
      * app.xr.input.on('select', (inputSource, evt) => {
      *     ray.set(inputSource.getOrigin(), inputSource.getDirection());
      *     if (obj.intersectsRay(ray)) {
@@ -144,10 +144,7 @@ class XrInput extends EventHandler {
      */
     _onInputSourcesChangeEvt;
 
-    /**
-     * @type {boolean}
-     * @ignore
-     */
+    /** @ignore */
     velocitiesSupported = false;
 
     /**

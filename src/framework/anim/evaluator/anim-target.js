@@ -9,7 +9,8 @@ class AnimTarget {
      *
      * @param {(value: number[]) => void} func - This function will be called when a new animation value is output
      * by the {@link AnimEvaluator}.
-     * @param {'vector'|'quaternion'|'number'} type - The type of animation data this target expects.
+     * @param {'vector'|'quaternion'|'number'} type - The type of animation data this target
+     * expects.
      * @param {number} components - The number of components on this target (this should ideally
      * match the number of components found on all attached animation curves).
      * @param {string} targetPath - The path to the target value.
@@ -25,8 +26,9 @@ class AnimTarget {
         this._components = components;
         this._targetPath = targetPath;
         this._isTransform = (this._targetPath.substring(this._targetPath.length - 13) === 'localRotation') ||
-        (this._targetPath.substring(this._targetPath.length - 13) === 'localPosition') ||
-        (this._targetPath.substring(this._targetPath.length - 10) === 'localScale');
+            (this._targetPath.substring(this._targetPath.length - 13) === 'localPosition') ||
+            (this._targetPath.substring(this._targetPath.length - 10) === 'localScale');
+        this._isWeight = this._targetPath.indexOf('weight.') !== -1;
     }
 
     get set() {
@@ -51,6 +53,17 @@ class AnimTarget {
 
     get isTransform() {
         return this._isTransform;
+    }
+
+    get isWeight() {
+        return this._isWeight;
+    }
+
+    /**
+     * Returns true if this target should use layer blending (transforms and weights).
+     */
+    get usesLayerBlending() {
+        return this._isTransform || this._isWeight;
     }
 }
 

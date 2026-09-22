@@ -2,7 +2,7 @@ import { TRACEID_BINDGROUPFORMAT_ALLOC } from '../../core/constants.js';
 import { Debug, DebugHelper } from '../../core/debug.js';
 import {
     TEXTUREDIMENSION_2D,
-    SAMPLETYPE_FLOAT, PIXELFORMAT_RGBA8, SHADERSTAGE_COMPUTE, SHADERSTAGE_VERTEX
+    SAMPLETYPE_FLOAT, SAMPLETYPE_UNFILTERABLE_FLOAT, PIXELFORMAT_RGBA8, SHADERSTAGE_COMPUTE, SHADERSTAGE_VERTEX
 } from './constants.js';
 import { DebugGraphics } from './debug-graphics.js';
 
@@ -19,10 +19,7 @@ let id = 0;
  * @category Graphics
  */
 class BindBaseFormat {
-    /**
-     * @type {number}
-     * @ignore
-     */
+    /** @ignore */
     slot = -1;
 
     /**
@@ -49,6 +46,19 @@ class BindBaseFormat {
         // SHADERSTAGE_VERTEX, SHADERSTAGE_FRAGMENT, SHADERSTAGE_COMPUTE
         this.visibility = visibility;
     }
+
+    /**
+     * A string describing the resource for the purpose of keying caches of shaders processed
+     * against it. Subclasses prefix it with the kind of the resource and append the properties
+     * that select their shader declaration. Valid once the slot has been assigned by the
+     * {@link BindGroupFormat}.
+     *
+     * @type {string}
+     * @ignore
+     */
+    get key() {
+        return `${this.slot}:${this.name}:${this.visibility}`;
+    }
 }
 
 /**
@@ -57,6 +67,10 @@ class BindBaseFormat {
  * @category Graphics
  */
 class BindUniformBufferFormat extends BindBaseFormat {
+    /** @ignore */
+    get key() {
+        return `U${super.key}`;
+    }
 }
 
 /**
@@ -68,7 +82,6 @@ class BindStorageBufferFormat extends BindBaseFormat {
     /**
      * Format, extracted from vertex and fragment shader.
      *
-     * @type {string}
      * @ignore
      */
     format = '';
@@ -94,6 +107,11 @@ class BindStorageBufferFormat extends BindBaseFormat {
         this.readOnly = readOnly;
         Debug.assert(readOnly || !(visibility & SHADERSTAGE_VERTEX), 'Storage buffer can only be used in read-only mode in SHADERSTAGE_VERTEX.');
     }
+
+    /** @ignore */
+    get key() {
+        return `SB${super.key}:${this.readOnly ? 1 : 0}:${this.format}`;
+    }
 }
 
 /**
@@ -103,11 +121,42 @@ class BindStorageBufferFormat extends BindBaseFormat {
  */
 class BindTextureFormat extends BindBaseFormat {
     /**
+     * Sampler uniform name. `null` when `multisampled` is true; otherwise the provided name or
+     * `${name}_sampler`.
+     *
+     * @type {string|null}
+     */
+    samplerName = null;
+
+    /**
+     * Whether a sampler binding follows this texture. Always false when `multisampled` is true.
+     *
+     * @type {boolean}
+     */
+    hasSampler;
+
+    /**
+     * Whether this is a multisampled (`texture_multisampled_*`) binding.
+     *
+     * @type {boolean}
+     */
+    multisampled;
+
+    /**
+     * The name of the built-in texture to substitute when a bind group has no value for this slot,
+     * which is an error. Resolved from the name here, so the render path does not have to.
+     *
+     * @type {string}
+     * @ignore
+     */
+    substituteTexture;
+
+    /**
      * Create a new instance.
      *
-     * @param {string} name - The name of the storage buffer.
-     * @param {number} visibility - A bit-flag that specifies the shader stages in which the storage
-     * buffer is visible. Can be:
+     * @param {string} name - The name of the texture.
+     * @param {number} visibility - A bit-flag that specifies the shader stages in which the texture
+     * is visible. Can be:
      *
      * - {@link SHADERSTAGE_VERTEX}
      * - {@link SHADERSTAGE_FRAGMENT}
@@ -123,6 +172,8 @@ class BindTextureFormat extends BindBaseFormat {
      * - {@link TEXTUREDIMENSION_CUBE_ARRAY}
      * - {@link TEXTUREDIMENSION_3D}
      *
+     * When `multisampled` is true, must be {@link TEXTUREDIMENSION_2D}.
+     *
      * @param {number} [sampleType] - The type of the texture samples. Defaults to
      * {@link SAMPLETYPE_FLOAT}. Can be:
      *
@@ -132,25 +183,50 @@ class BindTextureFormat extends BindBaseFormat {
      * - {@link SAMPLETYPE_INT}
      * - {@link SAMPLETYPE_UINT}
      *
+     * When `multisampled` is true, {@link SAMPLETYPE_FLOAT} is coerced to
+     * {@link SAMPLETYPE_UNFILTERABLE_FLOAT} (WebGPU rejects `sampleType: "float"` on a
+     * multisampled binding).
+     *
      * @param {boolean} [hasSampler] - True if the sampler for the texture is needed. Note that if the
      * sampler is used, it will take up an additional slot, directly following the texture slot.
-     * Defaults to true.
-     * @param {string|null} [samplerName] - Optional name of the sampler. Defaults to null.
+     * Defaults to true. Forced to false when `multisampled` is true.
+     * @param {string|null} [samplerName] - Sampler uniform name. If omitted, generated as
+     * `${name}_sampler`. Ignored and stored as `null` when `multisampled` is true.
+     * @param {boolean} [multisampled] - True if this is a multisampled texture binding
+     * (`texture_multisampled_2d` / `texture_depth_multisampled_2d`). When set, `hasSampler` is
+     * forced to false and `samplerName` to null (WGSL only allows `textureLoad`, and a WebGPU
+     * multisampled texture binding cannot be paired with a sampler). Defaults to false.
      */
-    constructor(name, visibility, textureDimension = TEXTUREDIMENSION_2D, sampleType = SAMPLETYPE_FLOAT, hasSampler = true, samplerName = null) {
+    constructor(name, visibility, textureDimension = TEXTUREDIMENSION_2D, sampleType = SAMPLETYPE_FLOAT, hasSampler = true, samplerName = null, multisampled = false) {
         super(name, visibility);
 
         // TEXTUREDIMENSION_***
         this.textureDimension = textureDimension;
 
-        // SAMPLETYPE_***
-        this.sampleType = sampleType;
+        this.multisampled = multisampled;
 
-        // whether to use a sampler with this texture
-        this.hasSampler = hasSampler;
+        // no sampler: WGSL only allows textureLoad, and a WebGPU multisampled texture binding
+        // cannot be paired with a sampler. Coerce rather than assert: hasSampler defaults to
+        // true, so `new BindTextureFormat(name, vis, dim, type, undefined, undefined, true)`
+        // must work without a debug assertion.
+        this.hasSampler = multisampled ? false : hasSampler;
+        this.samplerName = multisampled ? null : (samplerName ?? `${name}_sampler`);
+        this.sampleType = (multisampled && sampleType === SAMPLETYPE_FLOAT) ?
+            SAMPLETYPE_UNFILTERABLE_FLOAT : sampleType;
 
-        // optional name of the sampler (its automatically generated if not provided)
-        this.samplerName = samplerName ?? `${name}_sampler`;
+        // a missing scene depth reads as the far plane, where a missing color is better off
+        // obvious; anything else is a plain mistake, so make it obvious as well
+        this.substituteTexture = name === 'uSceneDepthMap' ? 'white' : 'pink';
+
+        if (multisampled) {
+            Debug.assert(textureDimension === TEXTUREDIMENSION_2D, `Multisampled texture binding '${name}' requires TEXTUREDIMENSION_2D.`);
+        }
+    }
+
+    /** @ignore */
+    get key() {
+        const sampler = this.hasSampler ? this.samplerName : '';
+        return `T${super.key}:${this.textureDimension}:${this.sampleType}:${sampler}:${this.multisampled ? 1 : 0}`;
     }
 }
 
@@ -201,6 +277,11 @@ class BindStorageTextureFormat extends BindBaseFormat {
         // whether the texture is readable
         this.read = read;
     }
+
+    /** @ignore */
+    get key() {
+        return `ST${super.key}:${this.format}:${this.textureDimension}:${this.write ? 1 : 0}:${this.read ? 1 : 0}`;
+    }
 }
 
 /**
@@ -209,6 +290,9 @@ class BindStorageTextureFormat extends BindBaseFormat {
  * resource type, and the visibility of these resources in the shader stages.
  * Currently this class is only used on WebGPU platform to specify the input and output resources
  * for vertex, fragment and compute shaders written in {@link SHADERLANGUAGE_WGSL} language.
+ *
+ * Call {@link BindGroupFormat#destroy} when no longer needed. On WebGPU, the graphics device
+ * retains bind group formats for device recovery until they are explicitly destroyed.
  *
  * @category Graphics
  */
@@ -238,10 +322,20 @@ class BindGroupFormat {
     storageBufferFormats = [];
 
     /**
+     * A string uniquely describing the resources of the format (their kinds, names, slots and
+     * the properties that select the shader declaration), used to key caches of shaders
+     * processed against this format.
+     *
+     * @type {string}
+     * @ignore
+     */
+    key;
+
+    /**
      * Create a new instance.
      *
      * @param {GraphicsDevice} graphicsDevice - The graphics device used to manage this vertex format.
-     * @param {(BindTextureFormat|BindStorageTextureFormat|BindUniformBufferFormat|BindStorageBufferFormat)[]} formats -
+     * @param {(BindTextureFormat|BindStorageTextureFormat|BindUniformBufferFormat|BindStorageBufferFormat)[]} formats
      * An array of bind formats. Note that each entry in the array uses up one slot. The exception
      * is a texture format that has a sampler, which uses up two slots. The slots are allocated
      * sequentially, starting from 0.
@@ -271,9 +365,12 @@ class BindGroupFormat {
             } else if (format instanceof BindStorageBufferFormat) {
                 this.storageBufferFormats.push(format);
             } else {
-                Debug.assert('Invalid bind format', format);
+                Debug.error('Invalid bind format', format);
             }
         });
+
+        // the slots are assigned above, so the resource keys are complete
+        this.key = formats.map(format => format.key).join(',');
 
         /** @type {GraphicsDevice} */
         this.device = graphicsDevice;

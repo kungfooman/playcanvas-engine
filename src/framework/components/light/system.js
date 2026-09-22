@@ -1,17 +1,33 @@
 import { Color } from '../../../core/math/color.js';
 import { Vec2 } from '../../../core/math/vec2.js';
-import { LIGHTSHAPE_PUNCTUAL } from '../../../scene/constants.js';
-import { Light, lightTypes } from '../../../scene/light.js';
 import { ComponentSystem } from '../system.js';
-import { LightComponent } from './component.js';
-import { properties, LightComponentData } from './data.js';
+import { _properties, LightComponent } from './component.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
+ * @import { Entity } from '../../entity.js'
  */
 
 /**
- * A Light Component is used to dynamically light the scene.
+ * Options of the `light` component accepted by {@link LightComponentSystem} that differ from the
+ * properties of {@link LightComponent}. Each replaces the same-named property of the options that
+ * {@link Entity#addComponent} derives from the component class; see
+ * {@link ComponentOptionsOverrides}.
+ *
+ * @typedef {object} LightComponentOptionsOverrides
+ * @property {Color | number[]} [color] - Same as {@link LightComponent#color}, also accepting an
+ * `[r, g, b]` array.
+ * @property {Vec2 | number[]} [cookieOffset] - Same as {@link LightComponent#cookieOffset}, also
+ * accepting an `[x, y]` array.
+ * @property {Vec2 | number[]} [cookieScale] - Same as {@link LightComponent#cookieScale}, also
+ * accepting an `[x, y]` array.
+ * @property {boolean} [enable] - Deprecated alias of `enabled`.
+ * @ignore
+ */
+
+/**
+ * Manages the {@link LightComponent}s of an application. Reach it through `app.systems.light`;
+ * components are created with {@link Entity#addComponent}, never by calling the system directly.
  *
  * @category Graphics
  */
@@ -28,19 +44,16 @@ class LightComponentSystem extends ComponentSystem {
         this.id = 'light';
 
         this.ComponentType = LightComponent;
-        this.DataType = LightComponentData;
 
-        this.on('beforeremove', this._onRemoveComponent, this);
+        // 'enable' is a deprecated alias for 'enabled', handled in initializeComponentData
+        this.extraDataProperties = ['enable'];
+
+        this.on('beforeremove', this.onBeforeRemove, this);
     }
 
     initializeComponentData(component, _data) {
         // duplicate because we're modifying the data
         const data = { ..._data };
-        if (!data.type) {
-            data.type = component.data.type;
-        }
-
-        component.data.type = data.type;
 
         if (data.layers && Array.isArray(data.layers)) {
             data.layers = data.layers.slice(0);
@@ -58,53 +71,44 @@ class LightComponentSystem extends ComponentSystem {
             data.cookieScale = new Vec2(data.cookieScale[0], data.cookieScale[1]);
         }
 
-        if (data.enable) {
+        if (data.hasOwnProperty('enable')) {
             console.warn('WARNING: enable: Property is deprecated. Set enabled property instead.');
             data.enabled = data.enable;
         }
 
-        if (!data.shape) {
-            data.shape = LIGHTSHAPE_PUNCTUAL;
+        for (let i = 0; i < _properties.length; i++) {
+            const property = _properties[i];
+            if (data.hasOwnProperty(property)) {
+                component[property] = data[property];
+            }
         }
 
-        const light = new Light(this.app.graphicsDevice, this.app.scene.clusteredLightingEnabled);
-        light.type = lightTypes[data.type];
-        light._node = component.entity;
-        component.data.light = light;
-
-        super.initializeComponentData(component, data, properties);
+        super.initializeComponentData(component, data);
     }
 
-    _onRemoveComponent(entity, component) {
-        component.onRemove();
+    onBeforeRemove(entity, component) {
+        component.onBeforeRemove();
     }
 
     cloneComponent(entity, clone) {
-        const light = entity.light;
+        const c = entity.light;
 
-        const data = [];
-        let name;
+        const data = {
+            enabled: c.enabled
+        };
 
-        for (let i = 0; i < properties.length; i++) {
-            name = properties[i];
-            if (name === 'light') {
-                continue;
-            }
+        for (let i = 0; i < _properties.length; i++) {
+            const name = _properties[i];
+            const value = c[name];
 
-            if (light[name] && light[name].clone) {
-                data[name] = light[name].clone();
+            if (value && value.clone) {
+                data[name] = value.clone();
             } else {
-                data[name] = light[name];
+                data[name] = value;
             }
         }
 
         return this.addComponent(clone, data);
-    }
-
-    changeType(component, oldValue, newValue) {
-        if (oldValue !== newValue) {
-            component.light.type = lightTypes[newValue];
-        }
     }
 }
 

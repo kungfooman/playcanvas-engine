@@ -29,6 +29,7 @@ import { Debug } from '../core/debug.js';
  *     evt.off();
  * });
  * events = [];
+ * @category Framework
  */
 class EventHandle {
     /**
@@ -63,7 +64,7 @@ class EventHandle {
 
     /**
      * True if event has been removed.
-     * @type {boolean}
+     *
      * @private
      */
     _removed = false;
@@ -120,6 +121,11 @@ class EventHandle {
      */
     get removed() {
         return this._removed;
+    }
+
+    // don't stringify EventHandle to JSON by JSON.stringify
+    toJSON(key) {
+        return undefined;
     }
 }
 

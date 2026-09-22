@@ -26,14 +26,16 @@ const standardMaterialParameterTypes = {
     ..._textureParameter('ao'),
     ..._textureParameter('aoDetail', true, false),
     aoDetailMode: 'string',
+    aoIntensity: 'number',
 
     diffuse: 'rgb',
     ..._textureParameter('diffuse'),
     ..._textureParameter('diffuseDetail', true, false),
     diffuseDetailMode: 'string',
 
+    vertexColorGamma: 'boolean',
+
     specular: 'rgb',
-    specularTint: 'boolean',
     ..._textureParameter('specular'),
     occludeSpecular: 'enum:occludeSpecular',
     specularityFactor: 'number',
@@ -43,10 +45,13 @@ const standardMaterialParameterTypes = {
     useMetalness: 'boolean',
     metalness: 'number',
     enableGGXSpecular: 'boolean',
-    anisotropy: 'number',
     metalnessTint: 'boolean',
     ..._textureParameter('metalness'),
     useMetalnessSpecularColor: 'boolean',
+
+    anisotropyIntensity: 'number',
+    anisotropyRotation: 'number',
+    ..._textureParameter('anisotropy'),
 
     shininess: 'number',
     gloss: 'number',
@@ -82,10 +87,15 @@ const standardMaterialParameterTypes = {
 
     ..._textureParameter('height', true, false),
     heightMapFactor: 'number',
+    heightMapBase: 'number',
+    parallaxMode: 'string',
+    parallaxSamples: 'number',
+    parallaxShadowSamples: 'number',
 
     alphaToCoverage: 'boolean',
     alphaTest: 'number',
     alphaFade: 'number',
+    alphaDither: 'number',
     opacity: 'number',
     ..._textureParameter('opacity'),
     opacityFadesSpecular: 'boolean',
@@ -138,6 +148,7 @@ const standardMaterialParameterTypes = {
     envAtlas: 'texture',
 
     twoSidedLighting: 'boolean',
+    flatShading: 'boolean',
     shadowCatcher: 'boolean'
 
     // nineSlicedMode
@@ -187,11 +198,13 @@ const standardMaterialRemovedParameters = {
     ambientTint: 'boolean',
     emissiveTint: 'boolean',
     diffuseTint: 'boolean',
+    specularTint: 'boolean',
     sheenTint: 'boolean',
     conserveEnergy: 'boolean',
     useGamma: 'boolean',
     useGammaTonemap: 'boolean',
-    sheenGlossTint: 'boolean'
+    sheenGlossTint: 'boolean',
+    anisotropy: 'boolean'
 };
 
 export {

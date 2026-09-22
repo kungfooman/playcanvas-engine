@@ -1,57 +1,82 @@
-import { deviceType, rootPath } from 'examples/utils';
-import * as pc from 'playcanvas';
+// @config
+//
+// @credit
+// title: Laboratory
+// author: Sketchfab
+// source: https://sketchfab.com/3d-models/laboratory-e860e49837c044478db650868866a448
+// license: CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
+
+import {
+    AppBase,
+    AppOptions,
+    Asset,
+    AssetListLoader,
+    CameraComponentSystem,
+    Color,
+    ContainerHandler,
+    Entity,
+    FILLMODE_FILL_WINDOW,
+    LightComponentSystem,
+    Mouse,
+    OutlineRenderer,
+    RESOLUTION_AUTO,
+    RenderComponentSystem,
+    ScriptComponentSystem,
+    ScriptHandler,
+    TEXTURETYPE_RGBP,
+    TextureHandler,
+    TouchDevice,
+    WasmModule,
+    createGraphicsDevice
+} from 'playcanvas';
+
+import { deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
 
-// set up and load draco module, as the glb we load is draco compressed
-pc.WasmModule.setConfig('DracoDecoderModule', {
-    glueUrl: `${rootPath}/static/lib/draco/draco.wasm.js`,
-    wasmUrl: `${rootPath}/static/lib/draco/draco.wasm.wasm`,
-    fallbackUrl: `${rootPath}/static/lib/draco/draco.js`
+// Set up and load draco module, as the glb we load is draco compressed
+WasmModule.setConfig('DracoDecoderModule', {
+    glueUrl: './assets/wasm/draco/draco.wasm.js',
+    wasmUrl: './assets/wasm/draco/draco.wasm.wasm',
+    fallbackUrl: './assets/wasm/draco/draco.js'
 });
 
 const assets = {
-    laboratory: new pc.Asset('statue', 'container', { url: `${rootPath}/static/assets/models/laboratory.glb` }),
-    orbit: new pc.Asset('orbit', 'script', { url: `${rootPath}/static/scripts/camera/orbit-camera.js` }),
-    helipad: new pc.Asset(
+    laboratory: new Asset('statue', 'container', { url: './assets/models/laboratory.glb' }),
+    orbit: new Asset('orbit', 'script', { url: './scripts/camera/orbit-camera.js' }),
+    helipad: new Asset(
         'helipad-env-atlas',
         'texture',
-        { url: `${rootPath}/static/assets/cubemaps/helipad-env-atlas.png` },
-        { type: pc.TEXTURETYPE_RGBP, mipmaps: false }
+        { url: './assets/cubemaps/helipad-env-atlas.png' },
+        { type: TEXTURETYPE_RGBP, mipmaps: false }
     )
 };
 
 const gfxOptions = {
-    deviceTypes: [deviceType],
-    glslangUrl: `${rootPath}/static/lib/glslang/glslang.js`,
-    twgslUrl: `${rootPath}/static/lib/twgsl/twgsl.js`
+    deviceTypes: [deviceType]
 };
 
-const device = await pc.createGraphicsDevice(canvas, gfxOptions);
-const createOptions = new pc.AppOptions();
+const device = await createGraphicsDevice(canvas, gfxOptions);
+const createOptions = new AppOptions();
 createOptions.graphicsDevice = device;
-createOptions.mouse = new pc.Mouse(document.body);
-createOptions.touch = new pc.TouchDevice(document.body);
+createOptions.mouse = new Mouse(document.body);
+createOptions.touch = new TouchDevice(document.body);
 
 createOptions.componentSystems = [
-    pc.RenderComponentSystem,
-    pc.CameraComponentSystem,
-    pc.LightComponentSystem,
-    pc.ScriptComponentSystem
+    RenderComponentSystem,
+    CameraComponentSystem,
+    LightComponentSystem,
+    ScriptComponentSystem
 ];
-createOptions.resourceHandlers = [
-    pc.ScriptHandler,
-    pc.TextureHandler,
-    pc.ContainerHandler
-];
+createOptions.resourceHandlers = [ScriptHandler, TextureHandler, ContainerHandler];
 
-const app = new pc.AppBase(canvas);
+const app = new AppBase(canvas);
 app.init(createOptions);
 
 // Set the canvas to fill the window and automatically change resolution to be the same as the canvas size
-app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
-app.setCanvasResolution(pc.RESOLUTION_AUTO);
+app.setCanvasFillMode(FILLMODE_FILL_WINDOW);
+app.setCanvasResolution(RESOLUTION_AUTO);
 
 // Ensure canvas is resized when window changes size
 const resize = () => app.resizeCanvas();
@@ -60,59 +85,57 @@ app.on('destroy', () => {
     window.removeEventListener('resize', resize);
 });
 
-const assetListLoader = new pc.AssetListLoader(Object.values(assets), app.assets);
-assetListLoader.load(() => {
-    app.start();
-
-    // setup skydome
-    app.scene.envAtlas = assets.helipad.resource;
-    app.scene.skyboxMip = 2;
-    app.scene.exposure = 2.5;
-
-    // get the instance of the laboratory
-    const laboratoryEntity = assets.laboratory.resource.instantiateRenderEntity();
-    laboratoryEntity.setLocalScale(100, 100, 100);
-    app.root.addChild(laboratoryEntity);
-
-    // Create an Entity with a camera component
-    const cameraEntity = new pc.Entity('SceneCamera');
-    cameraEntity.addComponent('camera', {
-        clearColor: new pc.Color(0.4, 0.45, 0.5),
-        nearClip: 1,
-        farClip: 600
-    });
-
-    // add orbit camera script
-    cameraEntity.addComponent('script');
-    cameraEntity.script.create('orbitCamera', {
-        attributes: {
-            inertiaFactor: 0.2,
-            focusEntity: laboratoryEntity,
-            distanceMax: 300
-        }
-    });
-    cameraEntity.script.create('orbitCameraInputMouse');
-    cameraEntity.script.create('orbitCameraInputTouch');
-
-    // position the camera in the world
-    cameraEntity.setLocalPosition(-60, 30, 60);
-    app.root.addChild(cameraEntity);
-
-    // create the outline renderer
-    const outlineRenderer = new pc.OutlineRenderer(app);
-
-    // add entities to the outline renderer
-    outlineRenderer.addEntity(laboratoryEntity.findByName('Weltkugel'), pc.Color.RED);
-    outlineRenderer.addEntity(laboratoryEntity.findByName('Stuhl'), pc.Color.WHITE);
-    outlineRenderer.addEntity(laboratoryEntity.findByName('Teleskop'), pc.Color.GREEN);
-
-    app.on('update', (/** @type {number} */ dt) => {
-
-        // update the outline renderer each frame, and render the outlines inside the opaque sub-layer
-        // of the immediate layer
-        const immediateLayer = app.scene.layers.getLayerByName('Immediate');
-        outlineRenderer.frameUpdate(cameraEntity, immediateLayer, false);
-    });
+await new Promise((resolve) => {
+    new AssetListLoader(Object.values(assets), app.assets).load(resolve);
 });
 
-export { app };
+app.start();
+
+// Setup skydome
+app.scene.envAtlas = assets.helipad.resource;
+app.scene.skyboxMip = 2;
+app.scene.exposure = 2.5;
+
+// Get the instance of the laboratory
+const laboratoryEntity = assets.laboratory.resource.instantiateRenderEntity();
+laboratoryEntity.setLocalScale(100, 100, 100);
+app.root.addChild(laboratoryEntity);
+
+// Create an Entity with a camera component
+const cameraEntity = new Entity('SceneCamera');
+cameraEntity.addComponent('camera', {
+    clearColor: new Color(0.4, 0.45, 0.5),
+    nearClip: 1,
+    farClip: 600
+});
+
+// Add orbit camera script
+cameraEntity.addComponent('script');
+cameraEntity.script.create('orbitCamera', {
+    attributes: {
+        inertiaFactor: 0.2,
+        focusEntity: laboratoryEntity,
+        distanceMax: 300
+    }
+});
+cameraEntity.script.create('orbitCameraInputMouse');
+cameraEntity.script.create('orbitCameraInputTouch');
+
+// Position the camera in the world
+cameraEntity.setLocalPosition(-60, 30, 60);
+app.root.addChild(cameraEntity);
+
+// Create the outline renderer
+const outlineRenderer = new OutlineRenderer(app);
+
+// Add entities to the outline renderer
+outlineRenderer.addEntity(laboratoryEntity.findByName('Weltkugel'), Color.RED);
+outlineRenderer.addEntity(laboratoryEntity.findByName('Stuhl'), Color.WHITE);
+outlineRenderer.addEntity(laboratoryEntity.findByName('Teleskop'), Color.GREEN);
+
+app.on('update', (/** @type {number} */ _dt) => {
+    // Update the outline renderer each frame, and render the outlines inside the opaque sub-layer
+    // Of the immediate layer
+    const immediateLayer = app.scene.layers.getLayerByName('Immediate');
+    outlineRenderer.frameUpdate(cameraEntity, immediateLayer, false);
+});

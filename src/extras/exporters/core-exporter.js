@@ -1,14 +1,12 @@
-import { createShaderFromCode } from '../../scene/shader-lib/utils.js';
+import { ShaderUtils } from '../../scene/shader-lib/shader-utils.js';
 import { Texture } from '../../platform/graphics/texture.js';
 import { BlendState } from '../../platform/graphics/blend-state.js';
 import { drawQuadWithShader } from '../../scene/graphics/quad-render-utils.js';
 import { RenderTarget } from '../../platform/graphics/render-target.js';
 import {
     FILTER_LINEAR, ADDRESS_CLAMP_TO_EDGE, isCompressedPixelFormat, PIXELFORMAT_RGBA8,
-    SEMANTIC_POSITION, SHADERLANGUAGE_WGSL, SHADERLANGUAGE_GLSL
+    SEMANTIC_POSITION
 } from '../../platform/graphics/constants.js';
-import { shaderChunks } from '../../scene/shader-lib/chunks/chunks.js';
-import { shaderChunksWGSL } from '../../scene/shader-lib/chunks-wgsl/chunks-wgsl.js';
 
 /**
  * @import { Color } from '../../core/math/color.js'
@@ -102,26 +100,39 @@ class CoreExporter {
             depth: false
         });
 
-        // render to a render target using a blit shader
-        const shader = device.isWebGPU ?
-            createShaderFromCode(device, shaderChunksWGSL.fullscreenQuadVS, shaderChunksWGSL.outputTex2DPS, 'ShaderCoreExporterBlit',
-                { vertex_position: SEMANTIC_POSITION }, { shaderLanguage: SHADERLANGUAGE_WGSL }
-            ) :
-            createShaderFromCode(device, shaderChunks.fullscreenQuadVS, shaderChunks.outputTex2DPS, 'ShaderCoreExporterBlit',
-                { vertex_position: SEMANTIC_POSITION }, { shaderLanguage: SHADERLANGUAGE_GLSL }
-            );
+        const shader = ShaderUtils.createShader(device, {
+            uniqueName: 'ShaderCoreExporterBlit',
+            attributes: { vertex_position: SEMANTIC_POSITION },
+            vertexChunk: 'fullscreenQuadVS',
+            fragmentChunk: 'outputTex2DPS'
+        });
+
+        // Freeing these goes through the device, so it has to happen while the device is still usable.
+        // The destroy event fires before the backend is torn down for exactly this, and the read
+        // settling is the other way it can come about - whichever happens first releases them once.
+        let released = false;
+        const release = () => {
+            if (released) {
+                return;
+            }
+            released = true;
+            device.off('destroy', release);
+            dstTexture.destroy();
+            renderTarget.destroy();
+        };
+        device.on('destroy', release);
+
         device.scope.resolve('source').setValue(texture);
         device.setBlendState(BlendState.NOBLEND);
-        drawQuadWithShader(device, renderTarget, shader);
+        drawQuadWithShader(device, renderTarget, shader, undefined, undefined, 'ExportTexture');
 
         // async read back the pixels of the texture
+        // released as soon as the read settles, before the pixels are copied out and turned into a
+        // canvas - holding them for that would raise the peak cost of a large export for nothing
         return dstTexture.read(0, 0, width, height, {
             renderTarget: renderTarget,
             immediate: true
-        }).then((textureData) => {
-
-            dstTexture.destroy();
-            renderTarget.destroy();
+        }).finally(release).then((textureData) => {
 
             const pixels = new Uint8ClampedArray(width * height * 4);
             pixels.set(textureData);

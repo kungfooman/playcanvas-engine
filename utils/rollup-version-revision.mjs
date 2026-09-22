@@ -5,15 +5,25 @@ import { execSync } from 'node:child_process';
  * @returns {string} Version string like `1.58.0-dev`
  */
 function getVersion() {
-    const text = readFileSync('./package.json', 'utf8');
-    const json = JSON.parse(text);
-    return json.version;
+    let path;
+    try {
+        path = execSync('git rev-parse --show-toplevel').toString().trim();
+    } catch (e) {
+        path = '.';
+    }
+    const pkg = JSON.parse(readFileSync(`${path}/package.json`, 'utf-8'));
+    return pkg.version;
 }
 
 /**
  * @returns {string} Revision string like `644d08d39` (9 digits/chars).
  */
 function getRevision() {
+    // Allow CI to pin the revision so otherwise-identical builds are byte-identical (the build-size
+    // workflow builds two commits and the embedded git hash would otherwise show as a phantom diff).
+    if (process.env.ENGINE_BUILD_REVISION) {
+        return process.env.ENGINE_BUILD_REVISION;
+    }
     let revision;
     try {
         revision = execSync('git rev-parse --short HEAD').toString().trim();

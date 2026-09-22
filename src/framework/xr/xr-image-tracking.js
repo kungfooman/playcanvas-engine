@@ -39,10 +39,7 @@ class XrImageTracking extends EventHandler {
      */
     _supported = platform.browser && !!window.XRImageTrackingResult;
 
-    /**
-     * @type {boolean}
-     * @private
-     */
+    /** @private */
     _available = false;
 
     /**
@@ -73,7 +70,7 @@ class XrImageTracking extends EventHandler {
      * estimate the appropriate transformation. Modifying the tracked images list is only possible
      * before an AR session is started.
      *
-     * @param {HTMLCanvasElement|HTMLImageElement|SVGImageElement|HTMLVideoElement|Blob|ImageData|ImageBitmap} image -
+     * @param {HTMLCanvasElement|HTMLImageElement|SVGImageElement|HTMLVideoElement|Blob|ImageData|ImageBitmap} image
      * Image that is matching real world image as close as possible. Resolution of images should be
      * at least 300x300. High resolution does _not_ improve tracking performance. The color of the
      * image is irrelevant, so grayscale images can be used. Images with too many geometric

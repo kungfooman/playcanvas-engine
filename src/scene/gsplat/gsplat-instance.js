@@ -1,49 +1,44 @@
+import { Debug, DebugHelper } from '../../core/debug.js';
 import { Mat4 } from '../../core/math/mat4.js';
 import { Vec3 } from '../../core/math/vec3.js';
-import { BUFFER_STATIC, PIXELFORMAT_R32U, SEMANTIC_ATTR13, TYPE_UINT32 } from '../../platform/graphics/constants.js';
-import { DITHER_NONE } from '../constants.js';
+import { BUFFERUSAGE_COPY_DST, CULLFACE_NONE, SEMANTIC_POSITION, PIXELFORMAT_R32U } from '../../platform/graphics/constants.js';
+import { StorageBuffer } from '../../platform/graphics/storage-buffer.js';
 import { MeshInstance } from '../mesh-instance.js';
-import { Mesh } from '../mesh.js';
 import { GSplatSorter } from './gsplat-sorter.js';
-import { VertexFormat } from '../../platform/graphics/vertex-format.js';
-import { VertexBuffer } from '../../platform/graphics/vertex-buffer.js';
+import { GSplatResourceBase } from './gsplat-resource-base.js';
+import { ShaderMaterial } from '../materials/shader-material.js';
+import { BLEND_NONE, BLEND_PREMULTIPLIED } from '../constants.js';
 
 /**
  * @import { Camera } from '../camera.js'
- * @import { GSplat } from './gsplat.js'
- * @import { GSplatCompressed } from './gsplat-compressed.js'
- * @import { GSplatSogs } from './gsplat-sogs.js'
  * @import { GraphNode } from '../graph-node.js'
- * @import { Material } from '../materials/material.js'
- * @import { SplatMaterialOptions } from './gsplat-material.js'
+ * @import { Mesh } from '../mesh.js'
  * @import { Texture } from '../../platform/graphics/texture.js'
  */
 
 const mat = new Mat4();
 const cameraPosition = new Vec3();
 const cameraDirection = new Vec3();
-const viewport = [0, 0];
-
 /** @ignore */
 class GSplatInstance {
-    /** @type {GSplat | GSplatCompressed | GSplatSogs } */
-    splat;
+    /** @type {GSplatResourceBase} */
+    resource;
 
-    /** @type {Mesh} */
-    mesh;
+    /** @type {Texture|undefined} */
+    orderTexture;
+
+    /** @type {StorageBuffer|undefined} */
+    orderBuffer;
+
+    /** @type {ShaderMaterial} */
+    _material;
 
     /** @type {MeshInstance} */
     meshInstance;
 
-    /** @type {Material} */
-    material;
-
-    /** @type {Texture} */
-    orderTexture;
-
     options = {};
 
-    /** @type {GSplatSorter | null} */
+    /** @type {GSplatSorter|null} */
     sorter = null;
 
     lastCameraPosition = new Vec3();
@@ -59,132 +54,139 @@ class GSplatInstance {
     cameras = [];
 
     /**
-     * @param {GSplat} splat - The splat instance.
-     * @param {SplatMaterialOptions} options - The options.
+     * @param {GSplatResourceBase} resource - The splat instance.
+     * @param {object} [options] - Options for the instance.
+     * @param {ShaderMaterial|null} [options.material] - The material instance.
+     * @param {import('../scene.js').Scene} [options.scene] - The scene to fire sort timing events on.
      */
-    constructor(splat, options) {
-        this.splat = splat;
+    constructor(resource, options = {}) {
+        this.resource = resource;
 
-        // clone options object
-        options = Object.assign(this.options, options);
+        const device = resource.device;
+        const dims = resource.streams.textureDimensions;
+        Debug.assert(dims.x > 0 && dims.y > 0, 'Resource must have valid texture dimensions before creating instance');
 
-        const device = splat.device;
+        const numSplats = dims.x * dims.y;
 
-        // create the order texture
-        this.orderTexture = this.splat.createTexture(
-            'splatOrder',
-            PIXELFORMAT_R32U,
-            this.splat.evalTextureSize(this.splat.numSplats)
-        );
-
-        // material
-        this.createMaterial(options);
-
-        // number of quads to combine into a single instance. this is to increase occupancy
-        // in the vertex shader.
-        const splatInstanceSize = 128;
-        const numSplats = Math.ceil(splat.numSplats / splatInstanceSize) * splatInstanceSize;
-        const numSplatInstances = numSplats / splatInstanceSize;
-
-        // specify the base splat index per instance
-        const indexData = new Uint32Array(numSplatInstances);
-        for (let i = 0; i < numSplatInstances; ++i) {
-            indexData[i] = i * splatInstanceSize;
+        // create order target: StorageBuffer on WebGPU, Texture on WebGL
+        if (device.isWebGPU) {
+            this.orderBuffer = new StorageBuffer(device, numSplats * 4, BUFFERUSAGE_COPY_DST);
+            DebugHelper.setName(this.orderBuffer, 'GsplatInstance.order');
+        } else {
+            this.orderTexture = resource.streams.createTexture(
+                'splatOrder',
+                PIXELFORMAT_R32U,
+                dims
+            );
         }
 
-        const vertexFormat = new VertexFormat(device, [
-            { semantic: SEMANTIC_ATTR13, components: 1, type: TYPE_UINT32, asInt: true }
-        ]);
+        if (options.material) {
+            this._material = options.material;
+            this._material.setDefine('{GSPLAT_INSTANCE_SIZE}', String(GSplatResourceBase.instanceSize));
+            this.setMaterialOrderData(this._material);
+            this._material.setParameter('alphaClipForward', 1.0 / 255.0);
+        } else {
+            this._material = new ShaderMaterial({
+                uniqueName: 'SplatMaterial',
+                vertexGLSL: '#include "gsplatVS"',
+                fragmentGLSL: '#include "gsplatPS"',
+                vertexWGSL: '#include "gsplatVS"',
+                fragmentWGSL: '#include "gsplatPS"',
+                attributes: {
+                    vertex_position: SEMANTIC_POSITION
+                }
+            });
 
-        const indicesVB = new VertexBuffer(device, vertexFormat, numSplatInstances, {
-            usage: BUFFER_STATIC,
-            data: indexData.buffer
-        });
-
-        // build the instance mesh
-        const meshPositions = new Float32Array(12 * splatInstanceSize);
-        const meshIndices = new Uint32Array(6 * splatInstanceSize);
-        for (let i = 0; i < splatInstanceSize; ++i) {
-            meshPositions.set([
-                -1, -1, i,
-                1, -1, i,
-                1, 1, i,
-                -1, 1, i
-            ], i * 12);
-
-            const b = i * 4;
-            meshIndices.set([
-                0 + b, 1 + b, 2 + b, 0 + b, 2 + b, 3 + b
-            ], i * 6);
+            this.configureMaterial(this._material);
+            this._material.update();
         }
 
-        const mesh = new Mesh(device);
-        mesh.setPositions(meshPositions, 3);
-        mesh.setIndices(meshIndices);
-        mesh.update();
-
-        this.mesh = mesh;
-        this.mesh.aabb.copy(splat.aabb);
-
-        this.meshInstance = new MeshInstance(this.mesh, this.material);
-        this.meshInstance.setInstancing(indicesVB, true);
+        resource.ensureMesh();
+        this.meshInstance = new MeshInstance(/** @type {Mesh} */ (resource.mesh), this._material);
+        this.meshInstance.setInstancing(true, true);
         this.meshInstance.gsplatInstance = this;
 
         // only start rendering the splat after we've received the splat order data
         this.meshInstance.instancingCount = 0;
 
-        // clone centers to allow multiple instances of sorter
-        const centers = splat.centers.slice();
-        const chunks = splat.chunks?.slice();
+        if (resource.hasCenters) {
+            const centers = resource.centers.slice();
+            const chunks = resource.chunks?.slice();
 
-        // create sorter
-        if (!options.dither || options.dither === DITHER_NONE) {
-            this.sorter = new GSplatSorter();
-            this.sorter.init(this.orderTexture, centers, chunks);
-            this.sorter.on('updated', (count) => {
-                // limit splat render count to exclude those behind the camera
-                this.meshInstance.instancingCount = Math.ceil(count / splatInstanceSize);
-
-                // update splat count on the material
-                this.material.setParameter('numSplats', count);
-            });
+            const orderTarget = this.orderBuffer ?? this.orderTexture;
+            this.sorter = new GSplatSorter(device, options.scene);
+            this.sorter.init(orderTarget, numSplats, centers, chunks);
+        } else {
+            Debug.warnOnce(`Skipping gsplat resource id ${resource.id} on the non-unified rendering path — no centers buffer. Scene#gsplatCentersEnabled needs to be true.`);
         }
     }
 
     destroy() {
+        this.resource?.releaseMesh();
+        this.orderTexture?.destroy();
+        this.orderBuffer?.destroy();
         this.material?.destroy();
         this.meshInstance?.destroy();
         this.sorter?.destroy();
     }
 
-    clone() {
-        return new GSplatInstance(this.splat, this.options);
-    }
-
-    createMaterial(options) {
-        this.material = this.splat.createMaterial(options);
-        this.material.setParameter('splatOrder', this.orderTexture);
-        this.material.setParameter('alphaClip', 0.3);
-        if (this.meshInstance) {
-            this.meshInstance.material = this.material;
+    /**
+     * Set order data parameters on the material.
+     *
+     * @param {ShaderMaterial} material - The material to configure.
+     */
+    setMaterialOrderData(material) {
+        if (this.orderBuffer) {
+            material.setParameter('splatOrder', this.orderBuffer);
+        } else {
+            material.setParameter('splatOrder', this.orderTexture);
+            material.setParameter('splatTextureSize', this.orderTexture.width);
         }
     }
 
-    updateViewport(cameraNode) {
-        const camera = cameraNode?.camera;
-        const renderTarget = camera?.renderTarget;
-        const { width, height } = renderTarget ?? this.splat.device;
+    /**
+     * @param {ShaderMaterial} value - The material instance.
+     */
+    set material(value) {
+        if (this._material !== value) {
+            this._material = value;
+            this._material.setDefine('{GSPLAT_INSTANCE_SIZE}', String(GSplatResourceBase.instanceSize));
+            this.setMaterialOrderData(this._material);
+            this._material.setParameter('alphaClipForward', 1.0 / 255.0);
 
-        viewport[0] = width;
-        viewport[1] = height;
-
-        // adjust viewport for stereoscopic VR sessions
-        const xr = camera?.camera?.xr;
-        if (xr?.active && xr.views.list.length === 2) {
-            viewport[0] *= 0.5;
+            if (this.meshInstance) {
+                this.meshInstance.material = value;
+            }
         }
+    }
 
-        this.material.setParameter('viewport', viewport);
+    get material() {
+        return this._material;
+    }
+
+    /**
+     * Configure the material with gsplat instance and resource properties.
+     *
+     * @param {ShaderMaterial} material - The material to configure.
+     * @param {object} [options] - Object for passing optional arguments.
+     * @param {boolean} [options.dither] - Specify true to configure the material for dithered rendering (stochastic alpha).
+     */
+    configureMaterial(material, options = {}) {
+        this.resource.configureMaterial(material, null, this.resource.format.getInputDeclarations());
+
+        material.setDefine('{GSPLAT_INSTANCE_SIZE}', GSplatResourceBase.instanceSize);
+        material.setParameter('numSplats', 0);
+        this.setMaterialOrderData(material);
+        material.setParameter('alphaClip', 0.3);
+        material.setParameter('alphaClipForward', 1.0 / 255.0);
+        material.setParameter('minPixelSize', 2.0);
+        material.setDefine(`DITHER_${options.dither ? 'BLUENOISE' : 'NONE'}`, '');
+        // opacityDitherPS picks its noise source off STD_OPACITY_DITHER, and nothing sets it for a
+        // ShaderMaterial, so without it the chunk declares no noise and the shader fails to compile
+        material.setDefine('STD_OPACITY_DITHER', options.dither ? 'BLUENOISE' : undefined);
+        material.cull = CULLFACE_NONE;
+        material.blendType = options.dither ? BLEND_NONE : BLEND_PREMULTIPLIED;
+        material.depthWrite = !!options.dither;
     }
 
     /**
@@ -209,11 +211,17 @@ class GSplatInstance {
                 this.sorter.setCamera(cameraPosition, cameraDirection);
             }
         }
-
-        this.updateViewport(cameraNode);
     }
 
     update() {
+
+        // Apply deferred sort results (at most one GPU upload per frame).
+        const count = this.sorter?.applyPendingSorted() ?? -1;
+        if (count >= 0) {
+            this.meshInstance.instancingCount = Math.ceil(count / GSplatResourceBase.instanceSize);
+            this.material.setParameter('numSplats', count);
+        }
+
         if (this.cameras.length > 0) {
 
             // sort by the first camera it's visible for

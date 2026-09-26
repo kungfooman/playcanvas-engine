@@ -5,7 +5,7 @@ import { Vec4 } from './core/math/vec4.js';
 import { Quat } from './core/math/quat.js';
 import { Mat3 } from './core/math/mat3.js';
 import { Mat4 } from './core/math/mat4.js';
-import { customTypes, customValidations, validateNumber, TypePanel, typedefs } from '@runtime-type-inspector/runtime';
+import { customTypes, customValidations, validateNumberInObject, TypePanel, typedefs } from '@runtime-type-inspector/runtime';
 import 'display-anything/src/style.js';
 
 // Ignore unhandled atm
@@ -71,7 +71,7 @@ function validate(value, expect, loc, name, critical, warn, depth) {
      * @returns {boolean} Wether prop is a valid number.
      */
     const checkProp = (prop) => {
-        return validateNumber(value, prop);
+        return validateNumberInObject(value, prop);
     };
     if (value instanceof Vec2) {
         return propsXY.every(checkProp);
@@ -99,10 +99,10 @@ function validate(value, expect, loc, name, critical, warn, depth) {
         return propsXYZW.every(checkProp);
     }
     if (value instanceof Mat3) {
-        return props9.every(prop => validateNumber(value.data, prop));
+        return props9.every(prop => validateNumberInObject(value.data, prop));
     }
     if (value instanceof Mat4) {
-        return props16.every(prop => validateNumber(value.data, prop));
+        return props16.every(prop => validateNumberInObject(value.data, prop));
     }
     return true;
 }

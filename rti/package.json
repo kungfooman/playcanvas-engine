@@ -11,8 +11,8 @@
   },
   "dependencies": {
     "@rollup/plugin-node-resolve": "16.0.0",
-    "@runtime-type-inspector/plugin-rollup": "4.0.6",
-    "@runtime-type-inspector/runtime": "4.0.6",
+    "@runtime-type-inspector/plugin-rollup": "5.0.3",
+    "@runtime-type-inspector/runtime": "5.0.3",
     "fflate": "0.8.3",
     "rollup": "4.35.0"
   },

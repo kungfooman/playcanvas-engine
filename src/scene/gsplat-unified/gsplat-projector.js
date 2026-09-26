@@ -35,7 +35,6 @@ import { computeGsplatProjectorSource } from '../shader-lib/wgsl/chunks/gsplat/c
 import { computeGsplatProjectorWriteIndirectArgsSource } from '../shader-lib/wgsl/chunks/gsplat/compute-gsplat-projector-write-indirect-args.js';
 import { computeGsplatProjectCommonSource } from '../shader-lib/wgsl/chunks/gsplat/compute-gsplat-project-common.js';
 import { computeGsplatCommonSource } from '../shader-lib/wgsl/chunks/gsplat/compute-gsplat-common.js';
-import { computeGsplatTileIntersectSource } from '../shader-lib/wgsl/chunks/gsplat/compute-gsplat-tile-intersect.js';
 import computeSplatSource from '../shader-lib/wgsl/chunks/gsplat/vert/gsplatComputeSplat.js';
 import gsplatModifyDefaultSource from '../shader-lib/wgsl/chunks/gsplat/vert/gsplatModify.js';
 import gsplatHelpersSource from '../shader-lib/wgsl/chunks/gsplat/vert/gsplatHelpers.js';
@@ -287,6 +286,7 @@ class GSplatProjector {
             new UniformFormat('minPixelSize', UNIFORMTYPE_FLOAT),
             new UniformFormat('cameraDirection', UNIFORMTYPE_VEC3),
             new UniformFormat('focal', UNIFORMTYPE_FLOAT),
+            new UniformFormat('focalY', UNIFORMTYPE_FLOAT),
             new UniformFormat('viewportWidth', UNIFORMTYPE_FLOAT),
             new UniformFormat('viewportHeight', UNIFORMTYPE_FLOAT),
             new UniformFormat('nearClip', UNIFORMTYPE_FLOAT),
@@ -423,7 +423,6 @@ class GSplatProjector {
 
         const cincludes = new Map();
         cincludes.set('gsplatCommonCS', computeGsplatCommonSource);
-        cincludes.set('gsplatTileIntersectCS', computeGsplatTileIntersectSource);
         cincludes.set('gsplatComputeSplatCS', computeSplatSource);
         cincludes.set('gsplatFormatDeclCS', wbFormat.getComputeInputDeclarations(fixedBindings.length));
         cincludes.set('gsplatFormatReadCS', wbFormat.getReadCode());
@@ -619,8 +618,8 @@ class GSplatProjector {
      * sortKeys (typically `worldState.totalActiveSplats`).
      * @param {boolean} params.radialSort - Whether to use the radial sort key variant.
      * @param {number} params.numBits - Sort key bit count (defines bucket count = 1 << numBits).
-     * @param {number} params.minDist - Minimum distance for sort key normalisation.
-     * @param {number} params.maxDist - Maximum distance for sort key normalisation.
+     * @param {number} params.minDist - Minimum distance for sort key normalization.
+     * @param {number} params.maxDist - Maximum distance for sort key normalization.
      * @param {number} params.alphaClip - Alpha cull threshold.
      * @param {number} params.minPixelSize - Minimum on-screen pixel size before culling.
      * @param {number} params.minContribution - Minimum total contribution before culling.
@@ -668,7 +667,7 @@ class GSplatProjector {
         const stereoMode = !!isStereo && !pickMode && !fisheyeMode;
 
         // A stochastic view generates no sort key, so the sort direction cannot affect it. Fold it
-        // away rather than compiling a second, behaviourally identical RADIAL_SORT variant.
+        // away rather than compiling a second, behaviorally identical RADIAL_SORT variant.
         const radialMode = radialSort && !stochastic;
 
         // AA only matters for the forward color path; skip it for picking to avoid
@@ -736,7 +735,9 @@ class GSplatProjector {
         const cameraComponent = cameraNode.camera;
         const cam = cameraComponent.camera;
         const webgpu = this.device.isWebGPU;
-        let focal;
+        // focal length in pixels per axis (they differ when the viewport's pixel aspect doesn't
+        // match the projection's)
+        let focal, focalY;
         if (stereoMode) {
             // XR stereo: use the per-eye matrices the forward path uses (raw projViewOffMat — NO
             // applyShaderProjectionTransform). Eye 0 drives the shared covariance/depth/sort; eye 1
@@ -747,8 +748,9 @@ class GSplatProjector {
             _viewProjData.set(views[0].projViewOffMat.data);
             _viewProj1Data.set(views[1].projViewOffMat.data);
             _viewData.set(views[0].viewOffMat.data);
-            // raw eye-0 projection x-scale; both eyes share it in standard stereo.
-            focal = viewportWidth * views[0].projMat.data[0];
+            // raw eye-0 projection scales; both eyes share them in standard stereo.
+            focal = viewportWidth * Math.abs(views[0].projMat.data[0]);
+            focalY = viewportHeight * Math.abs(views[0].projMat.data[5]);
         } else {
             // canonical (unflipped) projection - the cache stores canonical clip positions, and
             // the raster VS applies the per-pass target flip using the projectionFlipY uniform
@@ -756,7 +758,8 @@ class GSplatProjector {
             _viewProjMat.mul2(Camera.applyShaderProjectionTransform(cam.projectionMatrix, _shaderProjMat, false, webgpu), view);
             _viewProjData.set(_viewProjMat.data);
             _viewData.set(view.data);
-            focal = viewportWidth * _shaderProjMat.data[0];
+            focal = viewportWidth * Math.abs(_shaderProjMat.data[0]);
+            focalY = viewportHeight * Math.abs(_shaderProjMat.data[5]);
         }
 
         this.cameraPositionData[0] = cameraPos.x;
@@ -776,6 +779,7 @@ class GSplatProjector {
         }
 
         compute.setParameter('focal', focal);
+        compute.setParameter('focalY', focalY);
         compute.setParameter('viewportWidth', viewportWidth);
         compute.setParameter('viewportHeight', viewportHeight);
         compute.setParameter('nearClip', cam.nearClip);

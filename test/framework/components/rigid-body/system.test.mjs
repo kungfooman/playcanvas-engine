@@ -1,7 +1,9 @@
 import { expect } from 'chai';
-import { restore, spy } from 'sinon';
+import { restore, spy, stub } from 'sinon';
 
+import { Debug } from '../../../../src/core/debug.js';
 import { Vec3 } from '../../../../src/core/math/vec3.js';
+import { RaycastResult } from '../../../../src/framework/components/rigid-body/raycast-result.js';
 import { Entity } from '../../../../src/framework/entity.js';
 import { NullPhysicsWorld } from '../../../../src/framework/physics/null/null-physics-world.js';
 import { createApp } from '../../../app.mjs';
@@ -97,6 +99,41 @@ describe('RigidBodyComponentSystem', function () {
 
             // the forward contact is left untouched
             expect(forward.normal.equals(new Vec3(0, 1, 0))).to.be.true;
+        });
+
+        it('are reported by the backend through a listener other than the system', function () {
+            const system = app.systems.rigidbody;
+            const world = new NullPhysicsWorld();
+            system.setPhysicsWorld(world);
+
+            const listener = world.contactListener;
+            expect(listener).to.not.equal(system);
+
+            const a = new Entity('a');
+            const b = new Entity('b');
+            app.root.addChild(a);
+            app.root.addChild(b);
+            for (const entity of [a, b]) {
+                entity.addComponent('collision');
+                entity.addComponent('rigidbody', { type: 'dynamic' });
+            }
+
+            const collisionStart = spy();
+            a.rigidbody.on('collisionstart', collisionStart);
+
+            listener.onContactsBegin();
+            listener.onContactPair({
+                entityA: a,
+                entityB: b,
+                triggerA: false,
+                triggerB: false,
+                contactCount: 1,
+                readContact: (index, out) => out.normal.set(0, 1, 0)
+            });
+            listener.onContactsEnd();
+
+            expect(collisionStart.calledOnce).to.be.true;
+            expect(collisionStart.firstCall.args[0].other).to.equal(b);
         });
     });
 
@@ -358,6 +395,64 @@ describe('RigidBodyComponentSystem', function () {
             } finally {
                 bare.destroy();
             }
+        });
+    });
+
+    describe('raycasts', function () {
+        const start = new Vec3(0, 1, 0);
+        const end = new Vec3(0, -1, 0);
+
+        afterEach(function () {
+            restore();
+        });
+
+        /**
+         * Installs a no-op world whose raycastAll reports the given hits in the given order, which
+         * a backend is free to choose.
+         *
+         * @param {RaycastResult[]} hits - The hits to report.
+         */
+        function installWorldWithHits(hits) {
+            const world = new NullPhysicsWorld();
+            stub(world, 'raycastAll').callsFake(() => hits.slice());
+            app.systems.rigidbody.setPhysicsWorld(world);
+        }
+
+        function createHit(name, hitFraction) {
+            return new RaycastResult(new Entity(name), new Vec3(), new Vec3(0, 1, 0), hitFraction);
+        }
+
+        it('returns the closest hit of a filtered raycastFirst in any backend order', function () {
+            const near = createHit('near', 0.2);
+            installWorldWithHits([createHit('far', 0.8), near, createHit('mid', 0.5)]);
+
+            const result = app.systems.rigidbody.raycastFirst(start, end, { filterCallback: () => true });
+
+            expect(result).to.equal(near);
+        });
+
+        it('leaves the options passed to a filtered raycastFirst untouched', function () {
+            installWorldWithHits([createHit('hit', 0.5)]);
+            const options = { filterTags: ['player'] };
+
+            app.systems.rigidbody.raycastFirst(start, end, options);
+
+            expect(options).to.deep.equal({ filterTags: ['player'] });
+        });
+
+        it('misses instead of throwing when no physics backend is installed', function () {
+            const warnOnce = stub(Debug, 'warnOnce');
+            const system = app.systems.rigidbody;
+
+            expect(system.physicsWorld).to.be.null;
+            expect(system.raycastFirst(start, end)).to.equal(null);
+            expect(system.raycastFirst(start, end, { filterTags: ['player'] })).to.equal(null);
+            expect(system.raycastAll(start, end)).to.deep.equal([]);
+
+            expect(warnOnce.callCount).to.equal(3);
+            warnOnce.getCalls().forEach((call) => {
+                expect(call.args[0]).to.match(/no physics backend is installed/);
+            });
         });
     });
 

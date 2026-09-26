@@ -71,7 +71,10 @@ import { PhysicsJoint } from './physics-joint.js';
  * methods. JointComponent structurally satisfies this contract and passes itself.
  *
  * @typedef {object} PhysicsJointSettings
- * @property {boolean} enableLimits - Whether hinge/slider limits are enabled.
+ * @property {number} breakImpulse - The impulse threshold above which the joint breaks, or
+ * Infinity for an unbreakable joint. Applied at creation - later changes go through
+ * {@link PhysicsJoint#setBreakImpulse}.
+ * @property {boolean} enableLimits - Whether hinge, slider and ball joint limits are enabled.
  * @property {Vec2} limits - The hinge (degrees) or slider (meters) limits.
  * @property {number} motorSpeed - The hinge (deg/s) or slider (m/s) motor speed.
  * @property {number} maxMotorForce - The maximum motor force. The motor is engaged while > 0.
@@ -185,7 +188,7 @@ class PhysicsWorld {
     nativeWorld = null;
 
     /**
-     * Whether mesh shapes honour the per-instance {@link PhysicsMeshSource} scale, so that a
+     * Whether mesh shapes honor the per-instance {@link PhysicsMeshSource} scale, so that a
      * mesh shape is rebuilt when the world scale of its entity changes. Backends that cannot
      * scale mesh instances independently return false, and mesh shapes are then left alone when
      * their entity is rescaled.
@@ -376,6 +379,8 @@ class PhysicsWorld {
      * @param {object} [options] - The raycast options.
      * @param {number} [options.filterCollisionGroup] - Collision group to apply to the raycast.
      * @param {number} [options.filterCollisionMask] - Collision mask to apply to the raycast.
+     * @param {boolean} [options.hitBackFaces] - Whether the ray can hit the back faces of mesh
+     * colliders. Defaults to true.
      * @returns {RaycastResult|null} The hit, or null if there was none.
      * @ignore
      */
@@ -391,6 +396,8 @@ class PhysicsWorld {
      * @param {object} [options] - The raycast options.
      * @param {number} [options.filterCollisionGroup] - Collision group to apply to the raycast.
      * @param {number} [options.filterCollisionMask] - Collision mask to apply to the raycast.
+     * @param {boolean} [options.hitBackFaces] - Whether the ray can hit the back faces of mesh
+     * colliders. Defaults to true.
      * @param {any[]} [options.filterTags] - Tags filters. Defined the same way as a
      * {@link Tags#has} query but within an array. Hits filtered here are never allocated.
      * @param {Function} [options.filterCallback] - Custom function to use to filter entities.

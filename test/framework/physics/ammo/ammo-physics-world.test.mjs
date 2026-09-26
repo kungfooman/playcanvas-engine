@@ -297,7 +297,7 @@ describe('AmmoPhysicsWorld', function () {
                 return e;
             };
 
-            // node scale 2 makes the cube 2 units tall around its centre at y = 1 * entity scale
+            // node scale 2 makes the cube 2 units tall around its center at y = 1 * entity scale
             addModelEntity(0, 1);
             addModelEntity(10, 2);
 
@@ -358,6 +358,328 @@ describe('AmmoPhysicsWorld', function () {
             expect(destroy.calledWith(entry.triMesh)).to.equal(true);
         });
 
+    });
+
+    describe('mirrored mesh colliders', function () {
+
+        // Regression tests for https://github.com/playcanvas/engine/issues/4521. A negative scale
+        // factor mirrors the rendered mesh, and the collider used to ignore its sign.
+
+        beforeEach(function () {
+            installWorld();
+        });
+
+        /**
+         * Creates a unit cube mesh spanning 1 to 2 on every axis, so the octant a collider built
+         * from it lands in shows which axes it is mirrored along.
+         *
+         * @returns {Mesh} The mesh.
+         */
+        function createOffsetCubeMesh() {
+            const geometry = new BoxGeometry();
+            const mesh = new Mesh(app.graphicsDevice);
+            mesh.setPositions(geometry.positions.map(v => v + 1.5));
+            mesh.setIndices(geometry.indices);
+            mesh.update();
+            return mesh;
+        }
+
+        /**
+         * Creates a static entity with a mesh collider built from a render source.
+         *
+         * @param {Mesh} mesh - The collision mesh.
+         * @param {number[]} scale - The local scale.
+         * @param {object} [options] - Options.
+         * @param {boolean} [options.convexHull] - Build a convex hull instead of a triangle mesh.
+         * @param {Entity} [options.parent] - The parent entity.
+         * @param {number} [options.yaw] - The local rotation about Y in degrees.
+         * @returns {Entity} The entity.
+         */
+        function createScaledMeshEntity(mesh, scale, options = {}) {
+            const { convexHull = false, parent = app.root, yaw = 0 } = options;
+            const e = new Entity();
+            e.setLocalEulerAngles(0, yaw, 0);
+            e.setLocalScale(scale[0], scale[1], scale[2]);
+            parent.addChild(e);
+            e.addComponent('rigidbody', { type: 'static' });
+            e.addComponent('collision', { type: 'mesh', convexHull, render: { meshes: [mesh] } });
+            return e;
+        }
+
+        /**
+         * Casts a ray straight down through a point.
+         *
+         * @param {Vec3} point - The point the ray passes through.
+         * @returns {RaycastResult|null} The first hit, or null on a miss.
+         */
+        function hitAt(point) {
+            const from = new Vec3(point.x, 10, point.z);
+            const to = new Vec3(point.x, -10, point.z);
+            return app.systems.rigidbody.raycastFirst(from, to);
+        }
+
+        /**
+         * Casts a ray straight down through a point and returns the hit height, or null on a miss.
+         *
+         * @param {Vec3} point - The point the ray passes through.
+         * @returns {number|null} The hit height.
+         */
+        function topAt(point) {
+            return hitAt(point)?.point.y ?? null;
+        }
+
+        /**
+         * Expects the collider of an entity to be the box its render transform makes of the unit
+         * cube centered on local point (1.5, 1.5, 1.5), for transforms that keep the top of that
+         * box flat.
+         *
+         * @param {GraphNode} node - The node whose world transform renders the cube.
+         * @param {number} [tolerance] - The allowed height error.
+         */
+        function expectCubeWhereRendered(node, tolerance = 1e-3) {
+            const transform = node.getWorldTransform();
+            const center = transform.transformPoint(new Vec3(1.5, 1.5, 1.5));
+            const top = Math.max(
+                transform.transformPoint(new Vec3(1, 1, 1)).y,
+                transform.transformPoint(new Vec3(1, 2, 1)).y
+            );
+
+            // the top is hit from above, with a normal facing the ray whatever the winding
+            const hit = hitAt(center);
+            expect(hit?.point.y).to.be.closeTo(top, tolerance);
+            expect(hit.normal.y).to.be.closeTo(1, 1e-3);
+
+            // and not at the unmirrored position, where a vertical ray can tell them apart
+            const size = transform.getScale().mulScalar(1.5);
+            const unmirrored = node.getPosition().clone().add(size);
+            if (Math.hypot(unmirrored.x - center.x, unmirrored.z - center.z) > 1) {
+                expect(topAt(unmirrored)).to.equal(null);
+            }
+        }
+
+        [
+            [-1, 1, 1], [1, -1, 1], [1, 1, -1], [-1, -1, -1], [-2, 1, 0.5], [2, -0.5, -1.5]
+        ].forEach((scale) => {
+            it(`mirrors a triangle mesh collider with a scale of (${scale})`, function () {
+                const e = createScaledMeshEntity(createOffsetCubeMesh(), scale);
+                expectCubeWhereRendered(e);
+            });
+
+            it(`mirrors a convex hull collider with a scale of (${scale})`, function () {
+                const mesh = createOffsetCubeMesh();
+                const e = createScaledMeshEntity(mesh, scale, { convexHull: true });
+
+                // hulls carry a 0.01 collision margin
+                expectCubeWhereRendered(e, 0.02);
+            });
+        });
+
+        it('mirrors a collider whose ancestor has a negative scale', function () {
+            const parent = new Entity();
+            parent.setLocalScale(-1, 1, 1);
+            app.root.addChild(parent);
+
+            const mesh = createOffsetCubeMesh();
+            const e = createScaledMeshEntity(mesh, [1, 1, 1], { parent, yaw: 90 });
+            expectCubeWhereRendered(e);
+        });
+
+        it('mirrors a model node with a negative scale', function () {
+            const model = new Model();
+            model.graph = new GraphNode();
+            const node = new GraphNode();
+            node.setLocalEulerAngles(0, 90, 0);
+            node.setLocalScale(1, 1, -1);
+            model.graph.addChild(node);
+            model.meshInstances = [{ mesh: createOffsetCubeMesh(), node }];
+
+            const e = new Entity();
+            e.setLocalPosition(5, 0, 0);
+            app.root.addChild(e);
+            e.addComponent('rigidbody', { type: 'static' });
+            e.addComponent('collision', { type: 'mesh', model });
+
+            // the model renders at the node transform in the space of the entity
+            const rendered = new GraphNode();
+            e.addChild(rendered);
+            rendered.setLocalEulerAngles(0, 90, 0);
+            rendered.setLocalScale(1, 1, -1);
+            expectCubeWhereRendered(rendered);
+        });
+
+        it('rebuilds a collider when its entity becomes mirrored', function () {
+            const e = createScaledMeshEntity(createOffsetCubeMesh(), [1, 1, 1]);
+            expectCubeWhereRendered(e);
+
+            e.setLocalScale(-1, 1, 1);
+            step();
+
+            expectCubeWhereRendered(e);
+        });
+
+        // a static body does not follow rotation changes, and these turn the world rotation of
+        // the entity by 180 degrees without changing its signed scale
+        [
+            ['the mirrored axis changes', [-1, 1, 1], [1, -1, 1]],
+            ['an even mirror is applied', [1, 1, 1], [-1, -1, 1]]
+        ].forEach(([name, from, to]) => {
+            it(`rebuilds a collider when ${name}`, function () {
+                const e = createScaledMeshEntity(createOffsetCubeMesh(), from);
+                expectCubeWhereRendered(e);
+
+                e.setLocalScale(to[0], to[1], to[2]);
+                step();
+
+                expectCubeWhereRendered(e);
+            });
+        });
+
+        it('rebuilds a collider when the mirrored axis of an ancestor changes', function () {
+            const parent = new Entity();
+            parent.setLocalScale(1, 1, -1);
+            app.root.addChild(parent);
+
+            const e = createScaledMeshEntity(createOffsetCubeMesh(), [1, 1, 1], { parent });
+            expectCubeWhereRendered(e);
+
+            parent.setLocalScale(1, -1, 1);
+            step();
+
+            expectCubeWhereRendered(e);
+        });
+
+        it('keeps an unmirrored collider when it moves under a deeper parent', function () {
+            const e = createScaledMeshEntity(createOffsetCubeMesh(), [1, 1, 1]);
+            const shape = e.collision.shape;
+
+            const parent = new Entity();
+            app.root.addChild(parent);
+            e.reparent(parent);
+            step();
+
+            expect(e.collision.shape).to.equal(shape);
+        });
+
+        it('mirrors the children of a mirrored compound', function () {
+            const root = new Entity();
+            root.setLocalScale(-1, 1, 1);
+            app.root.addChild(root);
+
+            const child = new Entity();
+            child.setLocalPosition(2, 0.5, 0);
+            child.addComponent('collision', { type: 'box', halfExtents: new Vec3(0.5, 0.5, 0.5) });
+            root.addChild(child);
+
+            root.addComponent('collision', { type: 'compound' });
+            root.addComponent('rigidbody', { type: 'static' });
+
+            expect(topAt(new Vec3(-2, 0, 0))).to.be.closeTo(1, 1e-3);
+            expect(topAt(new Vec3(2, 0, 0))).to.equal(null);
+        });
+    });
+
+    describe('raycast back faces', function () {
+
+        // https://github.com/playcanvas/engine/issues/2516. The rays run off-center so they miss
+        // the diagonal shared by the two triangles of each cube face.
+
+        const above = new Vec3(0.2, 10, 0.1);
+        const inside = new Vec3(0.2, 0, 0.1);
+        const below = new Vec3(0.2, -10, 0.1);
+
+        beforeEach(function () {
+            installWorld();
+        });
+
+        /**
+         * Casts a ray down through the colliders and returns the hit heights, highest first.
+         *
+         * @param {Vec3} from - The ray start.
+         * @param {object} [options] - The raycast options.
+         * @returns {number[]} The hit heights.
+         */
+        function hitHeights(from, options = {}) {
+            const hits = app.systems.rigidbody.raycastAll(from, below, { ...options, sort: true });
+            return hits.map(hit => hit.point.y);
+        }
+
+        it('hits the back faces of a mesh collider by default', function () {
+            createMeshEntity(createCubeMesh());
+
+            const hits = app.systems.rigidbody.raycastAll(above, below, { sort: true });
+            expect(hits).to.have.lengthOf(2);
+            expect(hits[0].point.y).to.be.closeTo(0.5, 1e-3);
+            expect(hits[1].point.y).to.be.closeTo(-0.5, 1e-3);
+
+            // the bottom face points down, but its normal is flipped to face the start of the ray
+            expect(hits[1].normal.y).to.be.closeTo(1, 1e-3);
+        });
+
+        it('skips the back faces of a mesh collider when hitBackFaces is false', function () {
+            createMeshEntity(createCubeMesh());
+
+            const heights = hitHeights(above, { hitBackFaces: false });
+            expect(heights).to.have.lengthOf(1);
+            expect(heights[0]).to.be.closeTo(0.5, 1e-3);
+        });
+
+        it('skips the back face in front of a ray starting inside a mesh collider', function () {
+            createMeshEntity(createCubeMesh());
+
+            const rigidbody = app.systems.rigidbody;
+            expect(rigidbody.raycastFirst(inside, below).point.y).to.be.closeTo(-0.5, 1e-3);
+            expect(rigidbody.raycastFirst(inside, below, { hitBackFaces: false })).to.equal(null);
+        });
+
+        it('applies hitBackFaces to a filtered first hit', function () {
+            createMeshEntity(createCubeMesh());
+
+            const filterCallback = () => true;
+            const rigidbody = app.systems.rigidbody;
+            expect(rigidbody.raycastFirst(inside, below, { filterCallback })).to.not.equal(null);
+            expect(rigidbody.raycastFirst(inside, below, {
+                filterCallback,
+                hitBackFaces: false
+            })).to.equal(null);
+        });
+
+        it('never hits the back faces of a primitive collider', function () {
+            const e = new Entity();
+            app.root.addChild(e);
+            e.addComponent('rigidbody', { type: 'static' });
+            e.addComponent('collision', { type: 'box', halfExtents: new Vec3(0.5, 0.5, 0.5) });
+
+            expect(hitHeights(above)).to.have.lengthOf(1);
+            expect(hitHeights(inside)).to.have.lengthOf(0);
+        });
+
+        it('warns and hits back faces on an Ammo build without ray callback flags', function () {
+            const prototypes = [
+                Ammo.ClosestRayResultCallback.prototype,
+                Ammo.AllHitsRayResultCallback.prototype
+            ];
+            const setFlags = prototypes.map(p => p.set_m_flags);
+            prototypes.forEach((p) => {
+                p.set_m_flags = undefined;
+            });
+
+            try {
+                Debug._loggedMessages.clear();
+                const warn = stub(console, 'warn');
+                createMeshEntity(createCubeMesh());
+
+                expect(hitHeights(above, { hitBackFaces: false })).to.have.lengthOf(2);
+                expect(app.systems.rigidbody.raycastFirst(inside, below, {
+                    hitBackFaces: false
+                })).to.not.equal(null);
+                expect(warn.calledOnce).to.equal(true);
+                expect(warn.firstCall.args[0]).to.match(/hitBackFaces/);
+            } finally {
+                prototypes.forEach((p, i) => {
+                    p.set_m_flags = setFlags[i];
+                });
+            }
+        });
     });
 
     describe('contact normals', function () {
@@ -1082,6 +1404,144 @@ describe('AmmoPhysicsWorld', function () {
         });
     });
 
+    describe('application teardown', function () {
+
+        // Regression tests for https://github.com/playcanvas/engine/issues/6924. Triggers used to
+        // keep Ammo temporaries in module scope: they outlived the application, and an
+        // application restarted on a freshly loaded Ammo module wrote through the old module's
+        // objects, which misplaced its triggers.
+
+        /**
+         * Wraps every Ammo class constructor and Ammo.destroy to track the live native objects.
+         * Proxies rather than stubs, so that Ammo.castObject still finds the class's cache.
+         *
+         * @returns {{ live: Map<number, string>, untrack: Function }} Live object pointers mapped
+         * to their class names, and a function that removes the wrappers.
+         */
+        function trackObjects() {
+            const live = new Map();
+            const originals = {};
+
+            Object.keys(Ammo)
+            .filter(name => /^bt|Callback$/.test(name) && typeof Ammo[name] === 'function')
+            .forEach((name) => {
+                const Original = Ammo[name];
+                originals[name] = Original;
+                Ammo[name] = new Proxy(Original, {
+                    construct(target, args) {
+                        const obj = new target(...args);
+                        live.set(Ammo.getPointer(obj), name);
+                        return obj;
+                    }
+                });
+            });
+
+            const destroy = Ammo.destroy;
+            Ammo.destroy = (obj) => {
+                live.delete(Ammo.getPointer(obj));
+                destroy(obj);
+            };
+
+            const untrack = () => {
+                Object.assign(Ammo, originals);
+                Ammo.destroy = destroy;
+            };
+
+            return { live, untrack };
+        }
+
+        /**
+         * Creates a stand-alone collision component, which the engine simulates as a trigger.
+         *
+         * @param {object} options - The collision component options.
+         * @param {number} x - The world X position.
+         * @returns {Entity} The trigger entity.
+         */
+        function createTrigger(options, x) {
+            const e = new Entity();
+            e.setLocalPosition(x, 0, 0);
+            app.root.addChild(e);
+            e.addComponent('collision', options);
+            return e;
+        }
+
+        /**
+         * Creates a kinematic box, which a trigger reports.
+         *
+         * @param {number} x - The world X position.
+         * @returns {Entity} The box entity.
+         */
+        function createKinematicBox(x) {
+            const e = new Entity();
+            e.setLocalPosition(x, 0, 0);
+            app.root.addChild(e);
+            e.addComponent('collision', { type: 'box' });
+            e.addComponent('rigidbody', { type: 'kinematic' });
+            return e;
+        }
+
+        it('frees every native object, triggers included, with the application', function () {
+            const { live, untrack } = trackObjects();
+            try {
+                installWorld();
+
+                createTrigger({ type: 'box' }, 0);
+                createTrigger({ type: 'mesh', render: { meshes: [createCubeMesh()] } }, 10);
+                const compound = createTrigger({ type: 'compound' }, 20);
+                compound.addChild(createTrigger({ type: 'sphere' }, 20));
+                createKinematicBox(0.5);
+
+                app.update(1 / 60);
+                app.update(1 / 60);
+                expect(live.size).to.be.above(0);
+
+                app.destroy();
+                app = null;
+                expect([...live.values()].sort()).to.deep.equal([]);
+            } finally {
+                untrack();
+            }
+        });
+
+        it('places triggers correctly on a freshly loaded Ammo module', async function () {
+            this.timeout(20000);
+            const fresh = await loadAmmo();
+
+            installWorld();
+            createTrigger({ type: 'box' }, -7);
+            app.update(1 / 60);
+            app.destroy();
+            app = null;
+
+            // the restart an examples browser or editor launch page performs
+            const first = globalThis.Ammo;
+            globalThis.Ammo = fresh;
+            try {
+                app = createApp();
+                installWorld();
+
+                const trigger = createTrigger({ type: 'box' }, 5);
+                createKinematicBox(5.5);
+                let entered = 0;
+                trigger.collision.on('triggerenter', () => {
+                    entered++;
+                });
+
+                app.update(1 / 60);
+                app.update(1 / 60);
+
+                const origin = trigger.trigger.body.nativeBody.getWorldTransform().getOrigin();
+                expect(origin.x()).to.be.closeTo(5, 1e-5);
+                expect(entered).to.equal(1);
+            } finally {
+                // the application belongs to this module, so it goes before the swap back
+                app?.destroy();
+                app = null;
+                globalThis.Ammo = first;
+            }
+        });
+    });
+
     describe('legacy Ammo build', function () {
         let scaledShape;
 
@@ -1124,6 +1584,28 @@ describe('AmmoPhysicsWorld', function () {
 
             expect(warn.calledOnce).to.equal(true);
             expect(warn.firstCall.args[0]).to.match(/btScaledBvhTriangleMeshShape/);
+        });
+
+        it('bakes the mirroring of a collider into the shared triangle data', function () {
+            stub(console, 'warn');
+
+            // a unit cube spanning x 0.5 to 1.5
+            const geometry = new BoxGeometry();
+            const mesh = new Mesh(app.graphicsDevice);
+            mesh.setPositions(geometry.positions.map((v, i) => (i % 3 === 0 ? v + 1 : v)));
+            mesh.setIndices(geometry.indices);
+            mesh.update();
+
+            const e = new Entity();
+            e.setLocalPosition(5, 0, 0);
+            e.setLocalScale(-2, 2, 2);
+            app.root.addChild(e);
+            e.addComponent('rigidbody', { type: 'static' });
+            e.addComponent('collision', { type: 'mesh', render: { meshes: [mesh] } });
+
+            // mirrored and doubled about x = 5 it spans x 2 to 4, not 6 to 8
+            expect(hitHeightAt(3)).to.be.closeTo(1.0, 1e-3);
+            expect(hitHeightAt(7)).to.equal(null);
         });
 
     });

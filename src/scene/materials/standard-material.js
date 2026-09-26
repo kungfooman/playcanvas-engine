@@ -29,6 +29,7 @@ import { StandardMaterialOptionsBuilder } from './standard-material-options-buil
 import { standardMaterialCubemapParameters, standardMaterialTextureParameters } from './standard-material-parameters.js';
 import { DebugGraphics } from '../../platform/graphics/debug-graphics.js';
 import { ShaderUtils } from '../shader-lib/shader-utils.js';
+import { getViewTextures } from '../renderer/view-textures.js';
 
 /**
  * @import { BoundingBox } from '../../core/shape/bounding-box.js'
@@ -623,6 +624,9 @@ const { equalish, DEFAULT_REFRACTION_INDEX } = StandardMaterialOptionsBuilder;
  * @category Graphics
  */
 class StandardMaterial extends Material {
+    /** @ignore */
+    _usesViewTextures = true;
+
     static TEXTURE_PARAMETERS = standardMaterialTextureParameters;
 
     static CUBEMAP_PARAMETERS = standardMaterialCubemapParameters;
@@ -1858,7 +1862,7 @@ class StandardMaterial extends Material {
     /** @ignore */
     getShaderVariant(params) {
 
-        const { device, scene, pass, objDefs, sortedLights, cameraShaderParams, vertexFormat } = params;
+        const { device, scene, pass, objDefs, lightList, cameraShaderParams, vertexFormat } = params;
 
         // Minimal options for Depth, Shadow and Prepass passes
         const shaderPassInfo = ShaderPass.get(device).getByIndex(pass);
@@ -1867,9 +1871,9 @@ class StandardMaterial extends Material {
         options.defines = ShaderUtils.getCoreDefines(this, params);
 
         if (minimalOptions) {
-            this.shaderOptBuilder.updateMinRef(options, scene, this, objDefs, pass, sortedLights, vertexFormat);
+            this.shaderOptBuilder.updateMinRef(options, scene, this, objDefs, pass, lightList, vertexFormat);
         } else {
-            this.shaderOptBuilder.updateRef(options, scene, cameraShaderParams, this, objDefs, pass, sortedLights, vertexFormat);
+            this.shaderOptBuilder.updateRef(options, scene, cameraShaderParams, this, objDefs, pass, lightList, vertexFormat);
         }
 
         const useDualSourceBlending = shaderPassInfo.isForward && this.blendState.usesDualSourceBlending;
@@ -1889,7 +1893,7 @@ class StandardMaterial extends Material {
         // this is derived from the blend state and cannot be overridden by onUpdateShader
         options.useDualSourceBlending = useDualSourceBlending;
 
-        const processingOptions = new ShaderProcessorOptions(params.viewUniformFormat, params.vertexFormat);
+        const processingOptions = new ShaderProcessorOptions(params.viewUniformFormat, params.vertexFormat, getViewTextures(params.viewUniformFormat));
 
         // the shader is processed against the layout of the material: the format of its uniform
         // buffer, and the format of its bind group, which declares its textures

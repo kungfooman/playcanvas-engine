@@ -110,8 +110,8 @@ class GSplatParams {
         } else {
             // Large work buffer format (32 bytes/splat):
             // - dataColor (RGBA16F/RGBA16U): RGBA color with alpha
-            // - dataTransformA (RGBA32U): center.xyz (3×32-bit floats as uint) + rotation.xy (2×16-bit halfs)
-            // - dataTransformB (RG32U): rotation.z + scale.xyz (4×16-bit halfs, scale.w derived via sqrt)
+            // - dataTransformA (RGBA32U): center.xyz (3×32-bit floats as uint) + rotation.xy (2×16-bit halves)
+            // - dataTransformB (RG32U): rotation.z + scale.xyz (4×16-bit halves, scale.w derived via sqrt)
             const colorFormat = this._device.getRenderableHdrFormat([PIXELFORMAT_RGBA16F]) || PIXELFORMAT_RGBA16U;
             format = new GSplatFormat(this._device, [
                 { name: 'dataColor', format: colorFormat },
@@ -402,19 +402,20 @@ class GSplatParams {
 
     /**
      * Angle threshold in degrees to trigger LOD updates based on camera rotation. Set to 0 to
-     * disable rotation-based updates. Defaults to 0.
+     * disable rotation-based updates. Rotation only affects LOD through {@link lodBehindPenalty},
+     * so rotation-based updates also stop when the penalty is 1. Defaults to 90.
      */
-    lodUpdateAngle = 0;
+    lodUpdateAngle = 90;
 
     /** @private */
-    _lodBehindPenalty = 1;
+    _lodBehindPenalty = 1.5;
 
     /**
      * Multiplier applied to effective distance for nodes behind the camera when determining LOD.
-     * Value 1 means no penalty; higher values drop LOD faster for nodes behind the camera.
-     *
-     * Note: when using a penalty > 1, it often makes sense to set a positive
-     * {@link lodUpdateAngle} so LOD is re-evaluated on camera rotation, not just translation.
+     * Value 1 means no penalty; higher values drop LOD faster for nodes behind the camera. Streamed
+     * LOD files also load in order of the same penalized distance, so higher values load the view
+     * in front of the camera earlier. Works together with {@link lodUpdateAngle}, which
+     * re-evaluates LOD as the camera rotates. Defaults to 1.5.
      *
      * @type {number}
      */
@@ -634,6 +635,8 @@ class GSplatParams {
      * When the camera translates enough to change the viewing angle to an octree node or
      * splat by this amount, its SH colors are re-evaluated. Distant nodes naturally update
      * less frequently since they require more camera movement to reach the angle threshold.
+     * An orthographic camera views all splats along its forward direction, so their colors are
+     * re-evaluated together once the camera rotates by this amount, and moving it has no effect.
      * Set to 0 to update every frame where camera moves. Defaults to 10.
      */
     colorUpdateAngle = 10;

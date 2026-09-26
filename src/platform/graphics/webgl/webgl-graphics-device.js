@@ -803,7 +803,7 @@ class WebglGraphicsDevice extends GraphicsDevice {
     /**
      * @param {number} index - Index of the bind group slot
      * @param {BindGroup} bindGroup - Bind group to attach
-     * @param {number[]} [offsets] - Byte offsets for all uniform buffers in the bind group. Unused
+     * @param {Uint32Array} [offsets] - Byte offsets for all uniform buffers in the bind group. Unused
      * on WebGL: every uniform buffer is bound as a whole buffer from offset zero (see below).
      */
     setBindGroup(index, bindGroup, offsets) {
@@ -2522,7 +2522,7 @@ class WebglGraphicsDevice extends GraphicsDevice {
 
         // The copy out of the pixel buffer is synchronous, and the driver services it by submitting
         // and then waiting for whatever commands are outstanding when it runs. This read's own fence
-        // has signalled by now, so that wait is spent entirely on unrelated work queued behind it,
+        // has signaled by now, so that wait is spent entirely on unrelated work queued behind it,
         // which on a heavy scene is a frame's worth of rendering.
         const copyOut = () => {
             gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buf);

@@ -1,3 +1,4 @@
+import { Debug } from '../../core/debug.js';
 import { BINDGROUP_VIEW } from './constants.js';
 
 /**
@@ -23,19 +24,34 @@ class ShaderProcessorOptions {
     vertexFormat;
 
     /**
+     * The names of the textures the renderer supplies per pass in the view bind group, or null when
+     * the view bind group holds only the view uniform buffer.
+     *
+     * @type {Set<string>|null}
+     */
+    viewTextures = null;
+
+    /**
      * Constructs shader processing options, used to process the shader for uniform buffer support.
      *
-     * @param {UniformBufferFormat} [viewUniformFormat] - Format of the view uniform buffer. The
-     * view bind group contains only this single uniform buffer (no textures), so its layout is
-     * derived from the uniform format alone and no bind group format is required.
+     * @param {UniformBufferFormat} [viewUniformFormat] - Format of the view uniform buffer, the
+     * first binding of the view bind group.
      * @param {VertexFormat} [vertexFormat] - Format of the vertex buffer.
+     * @param {Set<string>|null} [viewTextures] - The names of the textures which are part of the
+     * view bind group, following the uniform buffer. On WebGPU each shader gets a view bind group
+     * format of exactly the view textures it declares. Only used with a view uniform format, and
+     * must be a function of it, as only the format is part of the processing key.
      */
-    constructor(viewUniformFormat, vertexFormat) {
+    constructor(viewUniformFormat, vertexFormat, viewTextures) {
 
         // construct a sparse array
         this.uniformFormats[BINDGROUP_VIEW] = viewUniformFormat;
 
         this.vertexFormat = vertexFormat;
+
+        if (viewUniformFormat && viewTextures) {
+            this.viewTextures = viewTextures;
+        }
     }
 
     /**
@@ -94,6 +110,22 @@ class ShaderProcessorOptions {
         return null;
     }
 
+    /**
+     * Debug check of a uniform no supplied format claims, which so falls to the per-draw mesh
+     * uniform buffer. A light uniform belongs in the view uniform buffer whenever a view format is
+     * supplied, so one landing here means the lighting chunks declare something the format does
+     * not carry, and it is uploaded per draw again.
+     *
+     * @param {string} name - The name of the uniform.
+     */
+    debugCheckMeshUniform(name) {
+        Debug.call(() => {
+            if (this.uniformFormats[BINDGROUP_VIEW] && /^light\d+_/.test(name)) {
+                Debug.warnOnce(`Light uniform '${name}' is not part of the view uniform buffer format and is uploaded per draw. Add it to LightSlotUniforms#appendFormats.`);
+            }
+        });
+    }
+
     getVertexElement(semantic) {
         return this.vertexFormat?.elements.find(element => element.name === semantic);
     }
@@ -122,9 +154,14 @@ class ShaderProcessorOptions {
             }
         }
 
-        // WebGPU shaders are processed per vertex format
+        // WebGPU shaders are processed per vertex format, and the view textures move to the view
+        // bind group. Their names follow from the view uniform format, and the format of that group
+        // from the source, so only the flag is needed
         if (device.isWebGPU) {
             key += `|v:${this.vertexFormat?.shaderProcessingHashString}`;
+            if (this.viewTextures) {
+                key += '|vt';
+            }
         }
 
         return key;

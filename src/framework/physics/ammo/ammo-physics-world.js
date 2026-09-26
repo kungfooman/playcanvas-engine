@@ -1,14 +1,14 @@
 import { Debug } from '../../../core/debug.js';
 import { Vec3 } from '../../../core/math/vec3.js';
-import {
-    BODYFLAG_KINEMATIC_OBJECT, BODYFLAG_NORESPONSE_OBJECT,
-    BODYSTATE_ACTIVE_TAG, BODYSTATE_DISABLE_DEACTIVATION, BODYSTATE_DISABLE_SIMULATION,
-    BODYTYPE_KINEMATIC
-} from '../../components/rigid-body/constants.js';
+import { BODYTYPE_KINEMATIC } from '../../components/rigid-body/constants.js';
 import { RaycastResult } from '../../components/rigid-body/raycast-result.js';
 import { PhysicsWorld } from '../physics-world.js';
 import { AmmoPhysicsBody } from './ammo-physics-body.js';
 import { createJoint, destroyJoint, destroyFixedBody } from './ammo-physics-joint.js';
+import {
+    ACTIVE_TAG, CF_KINEMATIC_OBJECT, CF_NO_CONTACT_RESPONSE, DISABLE_DEACTIVATION,
+    DISABLE_SIMULATION
+} from './constants.js';
 
 /**
  * @import { AmmoPhysicsJoint } from './ammo-physics-joint.js'
@@ -22,6 +22,34 @@ import {
  * @import { ContactPoint } from '../../components/rigid-body/contact-point.js'
  * @import { PhysicsBodyDesc, PhysicsJointDesc, PhysicsShapeDesc } from '../physics-world.js'
  */
+
+// btTriangleRaycastCallback::kF_FilterBackfaces
+const RAYFLAG_FILTER_BACKFACES = 1;
+
+/**
+ * Applies the raycast options shared by all ray queries to a native ray result callback.
+ *
+ * @param {object} rayCallback - The native ray result callback.
+ * @param {object} options - The raycast options.
+ */
+function applyRayOptions(rayCallback, options) {
+    if (typeof options.filterCollisionGroup === 'number') {
+        rayCallback.set_m_collisionFilterGroup(options.filterCollisionGroup);
+    }
+
+    if (typeof options.filterCollisionMask === 'number') {
+        rayCallback.set_m_collisionFilterMask(options.filterCollisionMask);
+    }
+
+    if (options.hitBackFaces === false) {
+        if (typeof rayCallback.set_m_flags === 'function') {
+            rayCallback.set_m_flags(RAYFLAG_FILTER_BACKFACES);
+        } else {
+            Debug.warnOnce('AmmoPhysicsWorld: this Ammo.js build does not expose ray callback ' +
+                'flags, so the hitBackFaces raycast option is ignored. Update Ammo.js.');
+        }
+    }
+}
 
 /**
  * The reused contact pair reported to the contact listener. Reads contact point data straight
@@ -364,11 +392,11 @@ class AmmoPhysicsWorld extends PhysicsWorld {
         Ammo.destroy(localInertia);
 
         if (type === BODYTYPE_KINEMATIC) {
-            nativeBody.setCollisionFlags(nativeBody.getCollisionFlags() | BODYFLAG_KINEMATIC_OBJECT);
-            nativeBody.setActivationState(BODYSTATE_DISABLE_DEACTIVATION);
+            nativeBody.setCollisionFlags(nativeBody.getCollisionFlags() | CF_KINEMATIC_OBJECT);
+            nativeBody.setActivationState(DISABLE_DEACTIVATION);
         }
         if (noContactResponse) {
-            nativeBody.setCollisionFlags(nativeBody.getCollisionFlags() | BODYFLAG_NORESPONSE_OBJECT);
+            nativeBody.setCollisionFlags(nativeBody.getCollisionFlags() | CF_NO_CONTACT_RESPONSE);
         }
 
         // entity back-reference on the native body: read by the raycast and manifold walks,
@@ -398,18 +426,20 @@ class AmmoPhysicsWorld extends PhysicsWorld {
         } else {
             this.nativeWorld.addRigidBody(nativeBody);
         }
+        body._inWorld = true;
 
         // kinematic bodies must never deactivate, everything else enters the active state
-        nativeBody.forceActivationState(body._type === BODYTYPE_KINEMATIC ? BODYSTATE_DISABLE_DEACTIVATION : BODYSTATE_ACTIVE_TAG);
+        nativeBody.forceActivationState(body._type === BODYTYPE_KINEMATIC ? DISABLE_DEACTIVATION : ACTIVE_TAG);
     }
 
     removeBody(body) {
         const nativeBody = body.nativeBody;
         this.nativeWorld.removeRigidBody(nativeBody);
+        body._inWorld = false;
 
         // set activation state to disable simulation so isActive() does not return true even
         // though the body is no longer in the world
-        nativeBody.forceActivationState(BODYSTATE_DISABLE_SIMULATION);
+        nativeBody.forceActivationState(DISABLE_SIMULATION);
     }
 
     /**
@@ -518,8 +548,8 @@ class AmmoPhysicsWorld extends PhysicsWorld {
             if (numContacts > 0) {
                 pair.entityA = e0;
                 pair.entityB = e1;
-                pair.triggerA = (wb0.getCollisionFlags() & BODYFLAG_NORESPONSE_OBJECT) !== 0;
-                pair.triggerB = (wb1.getCollisionFlags() & BODYFLAG_NORESPONSE_OBJECT) !== 0;
+                pair.triggerA = (wb0.getCollisionFlags() & CF_NO_CONTACT_RESPONSE) !== 0;
+                pair.triggerB = (wb1.getCollisionFlags() & CF_NO_CONTACT_RESPONSE) !== 0;
                 pair.contactCount = numContacts;
                 pair._manifold = manifold;
 
@@ -540,14 +570,7 @@ class AmmoPhysicsWorld extends PhysicsWorld {
         this._btRayStart.setValue(start.x, start.y, start.z);
         this._btRayEnd.setValue(end.x, end.y, end.z);
         const rayCallback = new Ammo.ClosestRayResultCallback(this._btRayStart, this._btRayEnd);
-
-        if (typeof options.filterCollisionGroup === 'number') {
-            rayCallback.set_m_collisionFilterGroup(options.filterCollisionGroup);
-        }
-
-        if (typeof options.filterCollisionMask === 'number') {
-            rayCallback.set_m_collisionFilterMask(options.filterCollisionMask);
-        }
+        applyRayOptions(rayCallback, options);
 
         this.nativeWorld.rayTest(this._btRayStart, this._btRayEnd, rayCallback);
         if (rayCallback.hasHit()) {
@@ -580,14 +603,7 @@ class AmmoPhysicsWorld extends PhysicsWorld {
         this._btRayStart.setValue(start.x, start.y, start.z);
         this._btRayEnd.setValue(end.x, end.y, end.z);
         const rayCallback = new Ammo.AllHitsRayResultCallback(this._btRayStart, this._btRayEnd);
-
-        if (typeof options.filterCollisionGroup === 'number') {
-            rayCallback.set_m_collisionFilterGroup(options.filterCollisionGroup);
-        }
-
-        if (typeof options.filterCollisionMask === 'number') {
-            rayCallback.set_m_collisionFilterMask(options.filterCollisionMask);
-        }
+        applyRayOptions(rayCallback, options);
 
         this.nativeWorld.rayTest(this._btRayStart, this._btRayEnd, rayCallback);
         if (rayCallback.hasHit()) {

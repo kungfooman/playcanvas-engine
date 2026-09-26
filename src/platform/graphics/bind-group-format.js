@@ -255,7 +255,7 @@ class BindStorageTextureFormat extends BindBaseFormat {
      * - {@link TEXTUREDIMENSION_2D_ARRAY}
      * - {@link TEXTUREDIMENSION_3D}
      *
-     * @param {boolean} [write] - Whether the storage texture is writeable. Defaults to true.
+     * @param {boolean} [write] - Whether the storage texture is writable. Defaults to true.
      * @param {boolean} [read] - Whether the storage texture is readable. Defaults to false. Note
      * that storage texture reads are only supported if
      * {@link GraphicsDevice#supportsStorageTextureRead} is true. Also note that only a subset of
@@ -271,7 +271,7 @@ class BindStorageTextureFormat extends BindBaseFormat {
         // TEXTUREDIMENSION_***
         this.textureDimension = textureDimension;
 
-        // whether the texture is writeable
+        // whether the texture is writable
         this.write = write;
 
         // whether the texture is readable
@@ -332,6 +332,15 @@ class BindGroupFormat {
     key;
 
     /**
+     * True when the format holds no resources. A bind group of it binds nothing, so the empty bind
+     * group of the device can be bound in its place.
+     *
+     * @type {boolean}
+     * @ignore
+     */
+    empty;
+
+    /**
      * Create a new instance.
      *
      * @param {GraphicsDevice} graphicsDevice - The graphics device used to manage this vertex format.
@@ -371,6 +380,7 @@ class BindGroupFormat {
 
         // the slots are assigned above, so the resource keys are complete
         this.key = formats.map(format => format.key).join(',');
+        this.empty = formats.length === 0;
 
         /** @type {GraphicsDevice} */
         this.device = graphicsDevice;

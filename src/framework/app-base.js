@@ -1,7 +1,6 @@
 // #if _DEBUG
 import { version, revision } from '../core/core.js';
 // #endif
-import { platform } from '../core/platform.js';
 import { now } from '../core/time.js';
 import { path } from '../core/path.js';
 import { TRACEID_RENDER_FRAME, TRACEID_RENDER_FRAME_TIME } from '../core/constants.js';
@@ -1037,6 +1036,9 @@ class AppBase extends EventHandler {
      * This function is called internally by PlayCanvas applications made in the Editor but you
      * will need to call start yourself if you are using the engine stand-alone.
      *
+     * The main loop is driven by `requestAnimationFrame`. Where that is unavailable, such as in
+     * Node.js, no loop runs, so call {@link update} yourself at the rate you need.
+     *
      * @example
      * app.start();
      */
@@ -1077,7 +1079,12 @@ class AppBase extends EventHandler {
         if (this.xr?.session) {
             this.frameRequestId = this.xr.session.requestAnimationFrame(this.tick);
         } else {
-            this.frameRequestId = platform.browser || platform.worker ? requestAnimationFrame(this.tick) : null;
+            // without requestAnimationFrame, as in Node.js (even with jsdom), there is no main
+            // loop and the application is driven by calling update directly. A pending frame is
+            // cancelled on each tick and on destroy, so both functions are required.
+            const hasFrameLoop = typeof requestAnimationFrame === 'function' &&
+                typeof cancelAnimationFrame === 'function';
+            this.frameRequestId = hasFrameLoop ? requestAnimationFrame(this.tick) : null;
         }
     }
 
@@ -1103,9 +1110,12 @@ class AppBase extends EventHandler {
      * Update the application. This function will call the update functions and then the postUpdate
      * functions of all enabled components. It will then update the current state of all connected
      * input devices. This function is called internally in the application's main loop and does
-     * not need to be called explicitly.
+     * not need to be called explicitly, except where there is no main loop, such as in Node.js.
      *
      * @param {number} dt - The time delta in seconds since the last frame.
+     * @example
+     * // run a Node.js server at 20 updates per second
+     * setInterval(() => app.update(1 / 20), 50);
      */
     update(dt) {
         this.frame++;
@@ -1459,8 +1469,8 @@ class AppBase extends EventHandler {
      * Only lights with bakeDir=true will be used for generating the dominant light direction.
      * @param {boolean} [settings.render.gsplatRadialSorting] - Enables radial sorting of Gaussian splats. Defaults to false.
      * @param {number} [settings.render.gsplatLodUpdateDistance] - Distance threshold in world units to trigger gsplat LOD updates. Defaults to 1.
-     * @param {number} [settings.render.gsplatLodUpdateAngle] - Angle threshold in degrees to trigger gsplat LOD updates based on camera rotation. Defaults to 0.
-     * @param {number} [settings.render.gsplatLodBehindPenalty] - Multiplier applied to effective distance for gsplat nodes behind the camera. Defaults to 1.
+     * @param {number} [settings.render.gsplatLodUpdateAngle] - Angle threshold in degrees to trigger gsplat LOD updates based on camera rotation. Defaults to 90.
+     * @param {number} [settings.render.gsplatLodBehindPenalty] - Multiplier applied to effective distance for gsplat nodes behind the camera. Defaults to 1.5.
      * @param {number} [settings.render.gsplatLodUnderfillLimit] - Maximum number of gsplat LOD levels allowed below the optimal level when optimal data is not resident. Defaults to 0.
      * @param {number} [settings.render.gsplatSplatBudget] - Target number of splats across all GSplats in the scene. LOD levels are chosen globally to stay within it; a non-positive value is not a way to disable this and the default is used instead. Defaults to 1000000.
      * @param {string} [settings.render.gsplatLodMode] - How LOD levels are chosen for streamed GSplats: 'distance' (default) orders detail by camera distance alone in concentric bands and ignores error metadata; 'error' spends the budget by measured approximation error, lifting sparse regions that distance leaves coarse at a higher memory cost.

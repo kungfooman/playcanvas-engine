@@ -201,6 +201,29 @@ describe('TextElement', function () {
         assertLineContents(['abcde fghij']);
     });
 
+    it('keeps the position of an entity that is already under a screen', function () {
+        const screen = new Entity('screen');
+        screen.addComponent('screen', { screenSpace: true });
+        app.root.addChild(screen);
+
+        const label = new Entity('label');
+        screen.addChild(label);
+        label.setLocalPosition(0, -40, 0);
+
+        // the text sizes the element to fit it, so no width or height is given
+        label.addComponent('element', {
+            type: 'text',
+            fontAsset: fontAsset,
+            text: 'abcde',
+            anchor: [0.5, 1, 0.5, 1],
+            pivot: [0.5, 1]
+        });
+
+        const position = label.getLocalPosition();
+        expect(position.x).to.be.closeTo(0, 1e-4);
+        expect(position.y).to.be.closeTo(-40, 1e-4);
+    });
+
 
     it('does not break onto multiple lines if the autoWidth is set to true', function () {
         element.fontAsset = fontAsset;
@@ -403,7 +426,7 @@ describe('TextElement', function () {
         element.text = 'abcde fghij klmno pqrst uvwxyz';
 
         // guard against the reorder handler silently failing to turn rtl on, which would leave
-        // this exercising the ltr path and let the rtl behaviour regress unnoticed
+        // this exercising the ltr path and let the rtl behavior regress unnoticed
         expect(element._text._rtl).to.equal(true);
 
         assertJustifiedLinesAreFlushWithBothEdges();
@@ -491,7 +514,7 @@ describe('TextElement', function () {
         ]);
     });
 
-    it('breaks words on hypens', function () {
+    it('breaks words on hyphens', function () {
         element.fontAsset = fontAsset;
 
         element.text = 'abcde fghij-klm nopqr stuvwxyz';
@@ -715,7 +738,7 @@ describe('TextElement', function () {
         ]);
     });
 
-    it('rtl - breaks words on hypens', function () {
+    it('rtl - breaks words on hyphens', function () {
         registerRtlHandler();
         element.fontAsset = fontAsset;
         element.rtlReorder = true;

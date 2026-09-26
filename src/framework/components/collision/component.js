@@ -124,7 +124,10 @@ class CollisionComponent extends Component {
      */
     static EVENT_TRIGGERLEAVE = 'triggerleave';
 
-    /** @private */
+    /**
+     * @type {'box'|'capsule'|'compound'|'cone'|'cylinder'|'mesh'|'sphere'}
+     * @private
+     */
     _type = 'box';
 
     /** @private */
@@ -204,6 +207,15 @@ class CollisionComponent extends Component {
     _builtWorldScale = null;
 
     /**
+     * The signs of the local scales of the entity and its ancestors when a mesh shape was last
+     * built, one entry per node - see getScaleSigns in the collision system.
+     *
+     * @type {number[]|null}
+     * @private
+     */
+    _builtScaleSigns = null;
+
+    /**
      * Create a new CollisionComponent.
      *
      * @param {CollisionComponentSystem} system - The ComponentSystem that created this Component.
@@ -230,17 +242,17 @@ class CollisionComponent extends Component {
      * Primitive volumes are sized by their own properties ({@link CollisionComponent#halfExtents},
      * {@link CollisionComponent#radius} and {@link CollisionComponent#height}) and ignore the
      * scale of the entity. Mesh volumes follow the world scale of the entity, including the scale
-     * of its ancestors, and are rebuilt at the start of the next physics step when that scale
-     * changes. Triangle mesh volumes share one set of collision triangle data per mesh, so
-     * rescaling them is cheap; a {@link CollisionComponent#convexHull} is rebuilt from the mesh
-     * vertices at the new scale. Sharing requires an Ammo.js build that exposes
-     * `btScaledBvhTriangleMeshShape`; with older builds, triangle mesh colliders sharing a mesh
-     * use the scale of the first one built and rescaling an entity at runtime does not affect
-     * its mesh collider.
+     * of its ancestors and any mirroring by negative scale factors, and are rebuilt at the start
+     * of the next physics step when that scale changes. Triangle mesh volumes share one set of
+     * collision triangle data per mesh, so rescaling them is cheap; a
+     * {@link CollisionComponent#convexHull} is rebuilt from the mesh vertices at the new scale.
+     * Sharing requires an Ammo.js build that exposes `btScaledBvhTriangleMeshShape`; with older
+     * builds, triangle mesh colliders sharing a mesh use the scale of the first one built and
+     * rescaling an entity at runtime does not affect its mesh collider.
      *
      * Defaults to "box".
      *
-     * @type {string}
+     * @type {'box'|'capsule'|'compound'|'cone'|'cylinder'|'mesh'|'sphere'}
      */
     set type(arg) {
         if (this._type === arg) {
@@ -255,7 +267,7 @@ class CollisionComponent extends Component {
     /**
      * Gets the type of the collision volume.
      *
-     * @type {string}
+     * @type {'box'|'capsule'|'compound'|'cone'|'cylinder'|'mesh'|'sphere'}
      */
     get type() {
         return this._type;
@@ -551,10 +563,23 @@ class CollisionComponent extends Component {
         return this._convexHull;
     }
 
+    /**
+     * @type {*}
+     * @ignore
+     */
     set shape(arg) {
         this._shape = arg;
     }
 
+    /**
+     * The physics backend's collision shape - a btCollisionShape with the Ammo backend - or null
+     * if it has not been created. An unsupported escape hatch for native functionality the
+     * component does not expose: code that uses it only works with that physics backend. The
+     * setter is kept for compatibility and does not rebuild the body.
+     *
+     * @type {*}
+     * @ignore
+     */
     get shape() {
         return this._shape;
     }
@@ -584,6 +609,10 @@ class CollisionComponent extends Component {
         return this._model;
     }
 
+    /**
+     * @type {*}
+     * @ignore
+     */
     set render(arg) {
         this._render = arg;
 
@@ -594,6 +623,15 @@ class CollisionComponent extends Component {
         }
     }
 
+    /**
+     * The render resource whose meshes form the mesh collision volume. It is set when
+     * {@link CollisionComponent#renderAsset} loads, and assigning a resource directly rebuilds
+     * the shape from its meshes. Application code should use
+     * {@link CollisionComponent#renderAsset} or {@link CollisionComponent#model} instead.
+     *
+     * @type {*}
+     * @ignore
+     */
     get render() {
         return this._render;
     }

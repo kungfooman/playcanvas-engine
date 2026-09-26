@@ -10,7 +10,7 @@ import { GraphNode } from '../../../src/scene/graph-node.js';
 import { GSplatOctreeInstance } from '../../../src/scene/gsplat-unified/gsplat-octree-instance.js';
 import { GSplatOctree } from '../../../src/scene/gsplat-unified/gsplat-octree.js';
 
-// An octree of leaves centred at the given positions, unit half-extent unless a fourth component
+// An octree of leaves centered at the given positions, unit half-extent unless a fourth component
 // gives one, so coverage differences can only come from the camera model and stated sizes.
 const makeOctree = centers => new GSplatOctree('/scene/lod-meta.json', {
     lodLevels: 1,
@@ -156,7 +156,26 @@ describe('GSplatOctreeInstance#evaluateNodeCoverage', function () {
         expect(scaled.nodeInfos[0].lodCoverage).to.be.closeTo(reference, reference * 1e-6);
     });
 
-    it('still penalises nodes behind an orthographic camera', function () {
+    it('keeps coverage finite while the backbuffer has no size', function () {
+        // a canvas with no width or height reports a 0, 0/0 or x/0 aspect ratio, and a horizontal
+        // FOV divides by it
+        const instance = makeInstance(makeOctree([[0, 0, -10], [0, 0, -1000]]));
+        for (const aspectRatio of [0, NaN, Infinity]) {
+            for (const horizontalFov of [false, true]) {
+                const camera = makeCamera(PROJECTION_PERSPECTIVE);
+                camera.camera.aspectRatio = aspectRatio;
+                camera.camera.horizontalFov = horizontalFov;
+
+                instance.evaluateNodeCoverage(camera, { lodBehindPenalty: 1.5 });
+
+                const [near, far] = instance.nodeInfos;
+                expect(Number.isFinite(near.lodCoverage), `aspect ${aspectRatio}, horizontalFov ${horizontalFov}`).to.equal(true);
+                expect(near.lodCoverage).to.be.above(far.lodCoverage);
+            }
+        }
+    });
+
+    it('still penalizes nodes behind an orthographic camera', function () {
         // Behind-camera content is invisible under any projection, so it must not win budget just
         // because orthographic coverage carries no distance term.
         const instance = makeInstance(makeOctree([[0, 0, -10], [0, 0, 10]]));

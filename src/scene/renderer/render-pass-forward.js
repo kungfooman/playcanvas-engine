@@ -393,12 +393,21 @@ class RenderPassForward extends RenderPass {
             }
 
             const renderTarget = step.renderTarget ?? device.backBuffer;
+
+            // splats are blended into every sample of a multisampled target, which makes them several
+            // times more expensive to render
+            Debug.call(() => {
+                if (renderTarget?.samples > 1 && layer.gsplatPlacements.length > 0) {
+                    Debug.warnOnce(`Gaussian splats on layer '${layer.name}' are rendered into the multisampled render target '${renderTarget.name}' (${renderTarget.samples} samples), which makes them several times more expensive to render. Render them into a single-sampled target: create the graphics device with antialias set to false, or use a CameraFrame with rendering.samples set to 1.`);
+                }
+            });
+
             renderer.renderForwardLayer(cameraComponent.camera, renderTarget, layer, transparent,
                 shaderPass, options);
 
             // Revert temp frame stuff
             // TODO: this should not be here, as each rendering / clearing should explicitly set up what
-            // it requires (the properties are part of render pipeline on WebGPU anyways)
+            // it requires (the properties are part of render pipeline on WebGPU anyway)
             device.setBlendState(BlendState.NOBLEND);
             device.setStencilState(null, null);
             device.setAlphaToCoverage(false);

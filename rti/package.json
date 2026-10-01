@@ -7,7 +7,9 @@
   "scripts": {
     "build": "cd .. && ./rti/node_modules/.bin/rollup -c rti/rollup.config.mjs",
     "build:es": "cd .. && ./rti/node_modules/.bin/rollup -c rti/rollup.config.mjs --environment RTI_FORMAT:es",
-    "stage": "npm run build:es && node stage.mjs"
+    "stage": "npm run build:es && node stage.mjs",
+    "build:examples": "npm run stage && node build-examples.mjs",
+    "develop": "npm run stage && node develop.mjs"
   },
   "dependencies": {
     "@rollup/plugin-node-resolve": "16.0.0",

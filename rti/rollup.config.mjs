@@ -7,7 +7,7 @@ import { buildTargetRTI } from './rollup-build-target-rti.mjs';
 // exactly like `target=rti` did before the esbuild migration.
 //
 // Only the .mjs bundle is needed for the Vite examples:
-//   cd examples && ENGINE_PATH=../build/playcanvas.rti.mjs npm run dev
+//   cd rti && npm run develop
 
 const onlyEs = process.env.RTI_FORMAT === 'es';
 

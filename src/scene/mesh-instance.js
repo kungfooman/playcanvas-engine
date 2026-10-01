@@ -12,6 +12,7 @@ import {
     SHADERDEF_UV0, SHADERDEF_UV1, SHADERDEF_VCOLOR, SHADERDEF_TANGENTS, SHADERDEF_NOSHADOW, SHADERDEF_SKIN,
     SHADERDEF_SCREENSPACE, SHADERDEF_MORPH_POSITION, SHADERDEF_MORPH_NORMAL, SHADERDEF_BATCH,
     SHADERDEF_LM, SHADERDEF_DIRLM, SHADERDEF_LMAMBIENT, SHADERDEF_INSTANCING, SHADERDEF_MORPH_TEXTURE_BASED_INT,
+    SHADERDEF_INSTANCEINDEX, SHADERDEF_MASK_SHIFT,
     SHADOW_CASCADE_ALL,
     instanceLightmapUniformNames
 } from './constants.js';
@@ -317,11 +318,10 @@ class MeshInstance {
     _drawBucket = 127;
 
     /**
-     * The graph node defining the transform for this instance.
-     *
      * @type {GraphNode}
+     * @private
      */
-    node;
+    _node;
 
     /**
      * Enable rendering for this mesh instance. Use visible property to enable/disable rendering
@@ -542,6 +542,25 @@ class MeshInstance {
     _aabbMeshVer = -1;
 
     /**
+     * The slot of the mesh instance in the mesh instance storage of the device, or -1 when it has
+     * none, see {@link GraphicsDevice#meshInstanceStorage}. Allocated on the first draw with a
+     * shader reading it.
+     *
+     * @type {number}
+     * @ignore
+     */
+    storageSlot = -1;
+
+    /**
+     * The transform version of the node the slot was last written for, see
+     * {@link Renderer#updateStorageSlot}.
+     *
+     * @type {number}
+     * @ignore
+     */
+    storageSlotVersion = -1;
+
+    /**
      * @type {BoundingBox|null}
      * @private
      */
@@ -616,11 +635,12 @@ class MeshInstance {
     _shaderCache = new Map();
 
     /**
-     * 2 byte toggles, 2 bytes light mask; Default value is no toggles and mask = MASK_AFFECT_DYNAMIC
+     * The shader defines: 24 bits of flags, and the light mask in the top 8 bits, see
+     * SHADERDEF_MASK_SHIFT. Defaults to no flags and a mask of MASK_AFFECT_DYNAMIC.
      *
      * @private
      */
-    _shaderDefs = MASK_AFFECT_DYNAMIC << 16;
+    _shaderDefs = MASK_AFFECT_DYNAMIC << SHADERDEF_MASK_SHIFT;
 
     /**
      * @type {CalculateSortDistanceCallback|null}
@@ -670,6 +690,31 @@ class MeshInstance {
 
         // 64-bit integer key that defines render order of this mesh instance
         this.updateKey();
+    }
+
+    /**
+     * Sets the graph node defining the transform for this instance.
+     *
+     * @type {GraphNode}
+     */
+    set node(node) {
+        if (node !== this._node) {
+            this._node = node;
+
+            // the transform versions cached for the previous node do not apply to this one, whose
+            // version counter can hold the same value
+            this._aabbVer = -1;
+            this.storageSlotVersion = -1;
+        }
+    }
+
+    /**
+     * Gets the graph node defining the transform for this instance.
+     *
+     * @type {GraphNode}
+     */
+    get node() {
+        return this._node;
     }
 
     /**
@@ -737,6 +782,15 @@ class MeshInstance {
         }
 
         if (this._mesh) {
+
+            // a mesh instance without a mesh is not drawn, so it releases its slot in the mesh
+            // instance storage, and gets a new one when drawn with a mesh again. Owners dropping a
+            // mesh instance without destroying it, such as the sprite component, clear its mesh
+            if (!mesh && this.storageSlot >= 0) {
+                this._mesh.device.meshInstanceStorage?.free(this.storageSlot);
+                this.storageSlot = -1;
+            }
+
             this._mesh.decRefCount();
         }
 
@@ -1111,14 +1165,15 @@ class MeshInstance {
 
     /**
      * Sets the light mask of this mesh instance: which {@link LightComponent}s light it. The value
-     * is a combination of `MASK_AFFECT_DYNAMIC`, `MASK_AFFECT_LIGHTMAPPED` and `MASK_BAKE`.
-     * Defaults to `MASK_AFFECT_DYNAMIC`.
+     * is a combination of `MASK_AFFECT_DYNAMIC`, `MASK_AFFECT_LIGHTMAPPED` and `MASK_BAKE`, and
+     * only its lowest 8 bits are used. Defaults to `MASK_AFFECT_DYNAMIC`.
      *
      * @type {number}
      */
     set mask(val) {
-        const toggles = this._shaderDefs & 0x0000FFFF;
-        this._updateShaderDefs(toggles | (val << 16));
+        Debug.assert((val & ~0xff) === 0, `MeshInstance#mask ${val} does not fit the 8 bits of the light mask`);
+        const flags = this._shaderDefs & ((1 << SHADERDEF_MASK_SHIFT) - 1);
+        this._updateShaderDefs(flags | ((val & 0xff) << SHADERDEF_MASK_SHIFT));
     }
 
     /**
@@ -1127,7 +1182,7 @@ class MeshInstance {
      * @type {number}
      */
     get mask() {
-        return this._shaderDefs >> 16;
+        return this._shaderDefs >>> SHADERDEF_MASK_SHIFT;
     }
 
     /**
@@ -1155,7 +1210,7 @@ class MeshInstance {
         const mesh = this.mesh;
         if (mesh) {
 
-            // this decreases ref count on the mesh
+            // this decreases ref count on the mesh, and releases the mesh instance storage slot
             this.mesh = null;
 
             // destroy mesh
@@ -1192,7 +1247,23 @@ class MeshInstance {
                 cmd?.destroy();
             }
             this.drawCommands = null;
+            this._updateShaderDefs(this._applyInstanceIndexDef(this._shaderDefs));
         }
+    }
+
+    /**
+     * Returns the shader defines with {@link SHADERDEF_INSTANCEINDEX} set when the draws of this
+     * mesh instance use the instance index for their own data: draw commands set the first
+     * instance of their draws, and instancing without a vertex buffer indexes the data of the
+     * instances by it. The shaders of other draws read the mesh instance storage by it.
+     *
+     * @param {number} shaderDefs - The shader defines.
+     * @returns {number} The shader defines with the flag updated.
+     * @private
+     */
+    _applyInstanceIndexDef(shaderDefs) {
+        const usesInstanceIndex = !!this.drawCommands || (!!this.instancingData && !this.instancingData.vertexBuffer);
+        return usesInstanceIndex ? (shaderDefs | SHADERDEF_INSTANCEINDEX) : (shaderDefs & ~SHADERDEF_INSTANCEINDEX);
     }
 
     // shader uniform names for the lightmaps of a mesh instance
@@ -1296,9 +1367,9 @@ class MeshInstance {
             this.cull = true;
         }
 
-        this._updateShaderDefs(vertexBuffer instanceof VertexBuffer ?
+        this._updateShaderDefs(this._applyInstanceIndexDef(vertexBuffer instanceof VertexBuffer ?
             (this._shaderDefs | SHADERDEF_INSTANCING) :
-            (this._shaderDefs & ~SHADERDEF_INSTANCING));
+            (this._shaderDefs & ~SHADERDEF_INSTANCING)));
     }
 
     /**
@@ -1386,6 +1457,11 @@ class MeshInstance {
         }
 
         if (!cmd) {
+
+            // the draw commands set the first instance of their draws, which the shaders reading the
+            // mesh instance storage would take for the slot
+            this._updateShaderDefs(this._applyInstanceIndexDef(this._shaderDefs));
+
             // multi-draw on WebGL needs the index size of the current mesh index buffer
             let indexSizeBytes = 0;
             if (multiDraw) {

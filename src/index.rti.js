@@ -5,11 +5,7 @@ import { Vec4 } from './core/math/vec4.js';
 import { Quat } from './core/math/quat.js';
 import { Mat3 } from './core/math/mat3.js';
 import { Mat4 } from './core/math/mat4.js';
-import { customTypes, customValidations, validateNumberInObject, TypePanel, typedefs } from '@runtime-type-inspector/runtime';
-import 'display-anything/src/style.js';
-
-// Ignore unhandled atm
-typedefs['reference'] = 'any';
+import { customTypes, customValidations, validateNumberInObject, TypePanel } from '@runtime-type-inspector/runtime';
 
 function ArrayLikeNumber(value) {
     if (!value) {

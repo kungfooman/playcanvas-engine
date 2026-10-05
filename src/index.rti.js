@@ -5,18 +5,7 @@ import { Vec4 } from './core/math/vec4.js';
 import { Quat } from './core/math/quat.js';
 import { Mat3 } from './core/math/mat3.js';
 import { Mat4 } from './core/math/mat4.js';
-import { customTypes, customValidations, validateNumberInObject, TypePanel } from '@runtime-type-inspector/runtime';
-
-function ArrayLikeNumber(value) {
-    if (!value) {
-        return false;
-    }
-    if (typeof value.length !== 'number') {
-        return false;
-    }
-    // Check every single item (todo)
-    return true;
-}
+import { customTypes, customValidations, validateNumberInObject, TypePanel, ignoredChecks, registerTypedef } from '@runtime-type-inspector/runtime';
 Object.assign(customTypes, {
     AnimSetter(value) {
         // Fix for type in ./framework/anim/evaluator/anim-target.js
@@ -43,6 +32,28 @@ Object.assign(customTypes, {
         return value?.constructor?.name?.endsWith('Renderer');
     }
 });
+// Simulated enum typedefs until engine #9613 lands (bare value-as-type JSDoc
+// like `{BODYTYPE_DYNAMIC|...}`): each name resolves to its literal through
+// the normal typedef path, so no annotation needs rewriting. Delete these
+// once the real typedefs exist.
+registerTypedef('ACTION_GAMEPAD', '"gamepad"');
+registerTypedef('ACTION_KEYBOARD', '"keyboard"');
+registerTypedef('ACTION_MOUSE', '"mouse"');
+registerTypedef('BODYTYPE_DYNAMIC', '"dynamic"');
+registerTypedef('BODYTYPE_KINEMATIC', '"kinematic"');
+registerTypedef('BODYTYPE_STATIC', '"static"');
+registerTypedef('DEVICETYPE_WEBGL2', '"webgl2"');
+registerTypedef('DEVICETYPE_WEBGPU', '"webgpu"');
+registerTypedef('JOINTTYPE_6DOF', '"6dof"');
+registerTypedef('JOINTTYPE_BALL', '"ball"');
+registerTypedef('JOINTTYPE_FIXED', '"fixed"');
+registerTypedef('JOINTTYPE_HINGE', '"hinge"');
+registerTypedef('JOINTTYPE_SLIDER', '"slider"');
+registerTypedef('MOTION_FREE', '"free"');
+registerTypedef('MOTION_LIMITED', '"limited"');
+registerTypedef('MOTION_LOCKED', '"locked"');
+registerTypedef('PIXELFORMAT_LA8', 2);
+registerTypedef('PIXELFORMAT_R32F', 15);
 // For quickly checking props of Vec2/Vec3/Vec4/Quat/Mat3/Mat4 without GC
 const propsXY   = ['x', 'y'];
 const propsXYZ  = ['x', 'y', 'z'];
@@ -103,40 +114,17 @@ function validate(value, expect, loc, name, critical, warn, depth) {
     return true;
 }
 customValidations.push(validate);
-/**
-* `@ignoreRTI`
-* @param {any} value - The value.
-* @param {*} expect - Expected type structure.
-* @todo Split array/class.
-* @param {string} loc - String like `BoundingBox#compute`
-* @param {string} name - Name of the argument.
-* @param {boolean} critical - Only false for unions.
-* @param {console["warn"]} warn - Function to warn with.
-* @param {number} depth - The depth to detect recursion.
-* @returns {boolean} Only false if we can find some NaN issues or denormalisation issues.
-*/
-function validateReference(value, expect, loc, name, critical, warn, depth) {
-    if (!expect) {
-        return true;
-    }
-    // `expect` should be:
-    //   args: ['number']
-    //   name: "ArrayLike"
-    //   optional: false
-    //   type: "reference"
-    if (expect.type !== 'reference') {
-        return true;
-    }
-    if (expect.args[0] === "number") {
-        return ArrayLikeNumber(value);
-    }
-    return true;
-}
-customValidations.push(validateReference);
+// `compute`/`computeMinMax` only consume the first `numVerts * 3` entries,
+// so holes in the over-allocated tail (e.g. index 1728 of 1752) never reach
+// the computation — skip just these two `vertices` checks, nothing else.
+// Quick repro for testing: /#/user-interface/anchors.
+ignoredChecks.add('BoundingBox#compute.vertices');
+ignoredChecks.add('BoundingBox#computeMinMax.vertices');
 export const typePanel = new TypePanel();
-globalThis.parent.addEventListener('message', (e) => {
-    if (e.data.type !== 'rti') {
-        return;
-    }
-    typePanel.handleEvent(e);
-});
+if (globalThis.parent !== globalThis) {
+    globalThis.parent.addEventListener('message', (e) => {
+        if (e.data?.type === 'rti' && e.data.destination === 'ui') {
+            typePanel.handleEvent(e);
+        }
+    });
+}
